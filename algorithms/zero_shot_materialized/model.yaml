@@ -1,0 +1,28 @@
+
+
+
+
+
+## MEDS-DEV descriptor for Curiosity. This retains the established command-slot interface.
+## Each MEDS-DEV run directory {output_dir} holds this run's artifacts as sibling subdirectories (data/,
+## pretrained/, algorithm/, embeddings/ or trajectories/, predictions/): MEDS-DEV keeps its own cmd.sh and .done marker in
+## {output_dir}, and artifacts are published by publishing their own destination directory.
+## Zero-shot commands receive the task itself through {task_criteria_path}, which needs the MEDS-DEV
+## passthrough described in SPEC.md section 2.4 (the analogue of {predicates_path}).
+metadata:
+  description: "Curiosity (CoMET) generative medical event model: Qwen2 decoder pretrained on tokenized MEDS timelines, zero-shot task prediction by Monte Carlo generation of future timelines."
+  contacts:
+    - name: "Florent Pollet"
+      email: "flo1.raymond@gmail.com"
+
+commands:
+  unsupervised:
+    train: |-
+      curiosity-meds preprocess_data --profile zero_shot_materialized external_meds_dir={dataset_dir} external_predicates_file={predicates_path} output_data_dir={output_dir}/data do_overwrite=true
+      curiosity-meds pretrain --profile zero_shot_materialized input_data_dir={output_dir}/data output_pretrained_algorithm_dir={output_dir}/pretrained
+  supervised:
+    train: null
+    predict: |-
+      curiosity-meds infer_trajectories --profile zero_shot_materialized input_data_dir={model_initialization_dir}/data input_pretrained_algorithm_dir={model_initialization_dir}/pretrained external_index_dir={labels_dir} splits=[{split}] output_trajectories_dir={output_dir}/trajectories do_overwrite=true
+      curiosity-meds predict_zero_shot_materialized --profile zero_shot_materialized input_data_dir={model_initialization_dir}/data external_meds_dir={dataset_dir} input_trajectories_dir={output_dir}/trajectories external_index_dir={labels_dir} external_task_criteria_file={task_criteria_path} external_predicates_file={predicates_path} splits=[{split}] output_predictions_dir={output_dir}/predictions do_overwrite=true external_evaluation_labels_dir={labels_dir}
+

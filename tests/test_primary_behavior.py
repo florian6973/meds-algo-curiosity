@@ -1,0 +1,18 @@
+"""Required algorithm-owned proof that the implementation performs its primary behavior."""
+
+import pytest
+
+def test_primary_behavior(profile):
+    """Replace this failure with positive-signal and shuffled-label control executions.
+
+    ``meds_algorithm.conformance.signal.build_signal_dataset`` is a small example fixture. Use it unchanged, adapt its codes,
+    or replace it when necessary. The completed test must run the real algorithm profile and explicitly prove that the
+    signal code is present in the algorithm's selected codes, vocabulary, predicates, or derived features
+    before asserting that the algorithm learns or otherwise responds to it. It must also run a shuffled-label
+    negative control. Use behavior appropriate to the selected algorithm profile; only trainable profiles should be
+    required to learn during the test.
+    """
+    pytest.fail(
+        "Implement the primary-behavior test: bind a known MEDS signal to the algorithm's real features, "
+        "run the real algorithm profile, assert its expected behavior, and include a shuffled-label negative control."
+    )

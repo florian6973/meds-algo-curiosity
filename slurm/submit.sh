@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=config.sh
+source "$SCRIPT_DIR/config.sh"
+
+dry_run=false
+if [[ "${1:-}" == "--dry-run" ]]; then
+  dry_run=true
+  shift
+fi
+
+# A cluster run must be reproducible from a commit. The refusal is here rather than in the
+# contract package because this is where the hazard is: a unit test on a modified tree is
+# normal, a multi-hour job whose code exists nowhere but one disk is not. --dry-run warns
+# instead of refusing, so a run can be prepared and reviewed before its commit is made.
+tree_status="$(git -C "$SCRIPT_DIR" status --porcelain 2>/dev/null || true)"
+if [[ -n "$tree_status" ]]; then
+  if [[ "$dry_run" == true ]]; then
+    echo "WARNING: working tree is dirty; this dry-run does not describe any commit." >&2
+  else
+    echo "Refusing to submit: the working tree is dirty, so this run would not be" >&2
+    echo "reproducible from any commit. Commit or stash first." >&2
+    git -C "$SCRIPT_DIR" status --porcelain >&2
+    exit 6
+  fi
+fi
+
+declared_text="$(curiosity-meds commands --profile "$PROFILE")"
+mapfile -t declared <<< "$declared_text"
+if [[ -z "${declared[0]:-}" ]]; then
+  echo "No commands declared" >&2
+  exit 1
+fi
+
+# STAGES submits a subset of the profile's commands (comma- or space-separated), in profile order. A task
+# bundle shares one preprocess_data and one pretrain across many tasks: run those once with SHARED_DIR set,
+# then submit only the per-task commands (e.g. STAGES=infer_trajectories,predict_zero_shot_materialized) for each task with the same SHARED_DIR.
+# Names are validated against the declared commands, so a typo fails instead of submitting nothing.
+commands=("${declared[@]}")
+if [[ -n "${STAGES:-}" ]]; then
+  read -r -a requested <<< "${STAGES//,/ }"
+  for stage in "${requested[@]}"; do
+    if [[ ! " ${declared[*]} " == *" $stage "* ]]; then
+      echo "STAGES names $stage, which is not a command of this profile: ${declared[*]}" >&2
+      exit 2
+    fi
+  done
+  commands=()
+  for candidate in "${declared[@]}"; do
+    if [[ " ${requested[*]} " == *" $candidate "* ]]; then
+      commands+=("$candidate")
+    fi
+  done
+fi
+
+run_id="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_SHA:-local}}"
+RUN_DIR="${RUN_DIR:-$RUN_ROOT/$run_id/$PROFILE/artifacts}"
+# Task-independent artifacts (data/, pretrained/) live in SHARED_DIR; per-run artifacts (algorithm/, inference/,
+# predictions/) in RUN_DIR. Unset, both are the same directory, which is what a single-task run wants.
+SHARED_DIR="${SHARED_DIR:-$RUN_DIR}"
+export RUN_DIR SHARED_DIR
+dependency=""
+# ARGS_<command> appends algorithm-owned key=value arguments to one command without editing config.sh (which would
+# leave the tree dirty), e.g. ARGS_infer_trajectories="n_trajectories=8 max_new_tokens=4096". They are recorded in the
+# command's args file like every other argument. SBATCH_EXTRA adds sbatch flags to every job, e.g.
+# SBATCH_EXTRA="--exclude=node1,node2".
+command_args() {
+  stage_args "$1"
+  local extra_var="ARGS_$1"
+  local item
+  for item in ${!extra_var:-}; do
+    printf '%s\n' "$item"
+  done
+}
+read -r -a sbatch_extra <<< "${SBATCH_EXTRA:-}"
+
+for command in "${commands[@]}"; do
+  args_dir="$RUN_ROOT/$run_id/$PROFILE/command-args"
+  args_file="$args_dir/$command.args"
+  if ! $dry_run; then
+    mkdir -p "$args_dir"
+    command_args "$command" > "$args_file"
+  fi
+  partition="$PARTITION_GPU"
+  time_limit="$TIME_GPU"
+  gres=(--gres="gpu:${GPUS}")
+  if [[ "$command" == "preprocess_data" ]]; then
+    partition="$PARTITION_CPU"
+    time_limit="$TIME_CPU"
+    gres=()
+  fi
+  submit=(sbatch --parsable --partition="$partition" --time="$time_limit" --cpus-per-task="$CPUS" --mem="$MEMORY")
+  if [[ -n "$dependency" ]]; then
+    submit+=(--dependency="afterok:$dependency")
+  fi
+  submit+=(${sbatch_extra[@]+"${sbatch_extra[@]}"})
+  submit+=("${gres[@]}" --export="ALL,PROFILE=$PROFILE,MEDS_ALGORITHM_COMMAND=$command,MEDS_ALGORITHM_ARGS_FILE=$args_file,RUN_ID=$run_id" "$SCRIPT_DIR/job.sbatch")
+  if $dry_run; then
+    # Print what the algorithm will be told to do, not only the sbatch wrapper. Without this
+    # a --dry-run review cannot show the algorithm's arguments at all, so grepping it for a
+    # misrouted input directory returns nothing -- which is also what a correct run looks
+    # like, making the review unfalsifiable for the thing it exists to check. Written to
+    # stdout only: dry-run stays non-mutating, so no args file is produced.
+    command_args "$command" | sed "s|^|# $command: |"
+    printf '%q ' "${submit[@]}"
+    printf '\n'
+    dependency="DRY_RUN_${command}"
+  else
+    dependency="$("${submit[@]}")"
+    echo "$command: $dependency"
+  fi
+done

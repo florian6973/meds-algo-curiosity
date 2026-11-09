@@ -1,0 +1,44 @@
+# Agent instructions
+
+Before editing, read `SPEC.md`, `README.md`, and `docs/IMPLEMENTATION_GUIDE.md` completely.
+`SPEC.md` points to the pinned core contract: run `meds-algorithm-spec` and read that specification too.
+
+Follow the scientific-ambiguity policy in `docs/IMPLEMENTATION_GUIDE.md`: confirmation is the default
+for material unresolved choices; exploratory assumptions require explicit opt-in. Track decisions in
+`IMPLEMENTATION_REPORT.md`, and preserve the blocking evaluation and execution gates in either mode.
+
+- `meds-algorithm` is an installed dependency. Do not copy its implementations into this repository.
+  Keep framework, batching, preprocessing-format and algorithm assumptions in the algorithm package.
+- Depend on the source's own package or executable, pinned to the reviewed revision, and write only contract
+  glue. If it breaks `meds-algorithm` within core's declared ranges, fix core; for a genuine conflict, run it from a
+  separate environment this package creates and manages (committed lockfile, digest in manifests), never via MEDS-DEV.
+  Reimplement only when it cannot run even in isolation or cannot meet the contract, and record why in
+  `IMPLEMENTATION_REPORT.md`; local hardware alone is not a reason. `curiosity_meds` must not shadow its name.
+- `src/curiosity_meds/`, `algorithms/<profile>/model.yaml`, command configuration, and `tests/e2e.py` are algorithm-owned.
+- Implement typed profile methods on `Curiosity`; keep source-defined settings in frozen `CuriosityConfig`.
+- For neural algorithms with matching semantics, reuse core `NNConfig`; document the capacity-multiplier mapping,
+  preserve inherited validation with `super().validate()`, and test the settings' actual effect.
+- Use core's runner for CLI and test execution. Methods write payloads into staging and return
+  `PayloadMetadata`; core owns publication, measurements and reserved manifest/config/request files.
+- Keep object-oriented code minimalist and auditable: cohesive components, explicit dependencies,
+  no unnecessary mutable globals/singletons, import-time computation or duplicated contract definitions.
+- Keep the public API small: export the intended algorithm/configuration classes, use a single leading
+  underscore for implementation-only helpers/modules, and omit internals from package re-exports and `__all__`.
+  Preserve required public contract methods/hooks; follow the API guidance in `docs/IMPLEMENTATION_GUIDE.md`.
+- Test configuration/request serialization and step execution in a fresh process. Reopen fitted artifacts;
+  do not rely on training having run on the same Python object.
+- Preserve the `zero_shot_materialized` algorithm profile and established command argument names.
+- Intermediate payloads are opaque. Generic tests validate their envelopes, not their contents.
+- MEDS-DEV owns dataset-specific predicates; the algorithm owns their interpretation.
+- Never associate outputs with prediction keys by row order.
+- Keep `STUB_PROFILES = set(PROFILES)` until every registered command and the real end-to-end adapter work.
+- Replace the intentional failure in `tests/test_primary_behavior.py`. Prove that a known signal reaches
+  the algorithm's real selected codes/features and produces the expected behavior, with a shuffled-label
+  negative control; adapt the example signal dataset rather than forcing an incompatible representation.
+- Run pytest with `-rs`, account for every skip, and require zero `algorithm_stub` skips before completion.
+- Follow the ordered gates in `docs/IMPLEMENTATION_GUIDE.md`. Stop for human approval before the MIMIC-IV
+  demo and again before the selected full-data run; do not infer data access or cluster authorization.
+- Submit cluster jobs only from the recorded SHA of a clean, committed, pushed revision. Use the approved
+  external full-data `work/` task bundle, record its registry digest, and synchronize structured results.
+- Report exact source revisions, commands, coverage, and measurements in `IMPLEMENTATION_REPORT.md`.
+- Do not commit datasets, checkpoints, credentials, or raw cluster logs.
