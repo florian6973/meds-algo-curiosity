@@ -29,6 +29,9 @@ TEST_CONFIG = CuriosityConfig(
     max_epochs=25, early_stopping_patience=5, warmup_fraction=0.05, device="cpu",
     n_samples=8, max_new_tokens=48, max_attempts=3, horizon_days=60.0,
 )
+# Real data (MIMIC-IV demo): the paper's defaults (Curiosity-S, n=20, 3 x 2,000 tokens, 365 d) on the GPU when
+# available; 8-sequence optimizer steps because the demo's ~100 subjects fill only a few 8,192-token windows.
+DEMO_CONFIG = CuriosityConfig(sequences_per_step=8)
 
 
 def build_fixture(root: Path, *, seed: int = 0, shuffle_outcomes: bool = False, sizes=(1000, 100, 40)):
@@ -112,7 +115,7 @@ def run_e2e(
     instance per step. Without ``external_meds_dir`` it builds the synthetic fixture and its task."""
     tmp_path = Path(tmp_path)
     tmp_path.mkdir(parents=True, exist_ok=True)
-    config = config or TEST_CONFIG
+    config = config or (TEST_CONFIG if external_meds_dir is None else DEMO_CONFIG)
     canaries = {}
     if external_meds_dir is None:
         external_meds_dir, canaries = build_fixture(tmp_path / "fixture", seed=seed, shuffle_outcomes=shuffle_outcomes)

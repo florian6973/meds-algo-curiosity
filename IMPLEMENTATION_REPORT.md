@@ -163,15 +163,27 @@
 - Example generator used or adaptation made: core `build_signal_dataset` was replaced (its `BG//*`/`SIGNAL//POS`
   codes are outside the paper's categories, and a zero-shot task needs a temporal structure). The replacement
   is `tests/e2e.build_fixture`: MIMIC-IV-MEDS-style codes with ACES-derived labels, plus core split canaries.
-- Positive-control result: pending the final local gate run.
-- Shuffled-label negative-control result: pending the final local gate run.
+- Test model: `TEST_CONFIG`, a 2-head, 2-layer Curiosity (capacity 2/12) on CPU. A one-head model did not learn
+  the dependency in 630 steps (P(death) 0.49 for both drugs); two heads and two layers did (0.94 vs 0.014 in
+  a direct next-token probe).
+- Positive-control result (fixture: 1000/100/40 subjects, n = 8): mean predicted probability **0.98** for
+  signal-drug held-out subjects vs **0.05** for control-drug subjects; the test requires a difference > 0.5.
+- Shuffled-label negative-control result (outcome a coin flip, independent of the drug): **0.66** vs **0.64**;
+  the test requires |difference| < 0.3.
 
 | Suite/run | Exact command | Pass/skip counts | Coverage/result |
 |---|---|---|---|
-| Local | `uv run pytest -rs` | pending | pending |
-| MEDS-DEV | `uv run pytest -m meds_dev -rs` | pending | pending |
+| Local | `uv run pytest -rs` | 26 passed, 2 skipped (the opt-in `meds_dev` and `real_data` tests: "explicitly select -m meds_dev or -m real_data"); 0 `algorithm_stub` skips | Conformance (full lifecycle, key coverage, label-blind rerun with identical probabilities, split canaries absent from fitted codes, task digest, ledger), primary behavior, 17 algorithm-specific tests |
+| Distribution | `bash scripts/check_distribution.sh` | build, `twine check`, installed `wheel_smoke.py` (plain and `--orchestration`) pass; `uv pip check` reports a false positive (see Known limitations) | Installed imports, CLI, bundled defaults, aces-relaxations import, Qwen2 build |
+| MEDS-DEV | `uv run pytest -m meds_dev -rs` | 1 passed, 27 deselected | `meds-dev-model mode=full dataset_type=full` with MEDS-DEV @ `19a8aa34`, model.yaml defaults on GPU, fixture 200/20/10; held-out keys covered |
 | MIMIC-IV demo | `uv run pytest -m real_data -rs` | not run: awaiting human approval | — |
 | Full target dataset (MIMIC-IV; revision to be confirmed) | not run | — | Blocked: no evaluation task bundle was supplied |
+
+Proposed MIMIC-IV demo execution (needs approval): `uv run pytest -m real_data -rs`. MEDS-DEV builds the
+MIMIC-IV demo with MIMIC-IV-MEDS 0.1.0 and extracts `mortality/in_icu/first_24h` labels; the test runs the full
+profile with MEDS-DEV's MIMIC-IV predicates and the task's own criteria. It uses `DEMO_CONFIG` (paper defaults:
+Curiosity-S, context 8,192, n = 20, 3 × 2,000 tokens, 365-day horizon) with 8-sequence optimizer steps, on the
+GB10 GPU, and predicts the held-out split. The demo result is a scale/pipeline check, not a scientific result.
 
 ## Review gates
 
@@ -184,11 +196,16 @@
 
 | Environment/command | Wall seconds | Peak tree PSS bytes | Peak tree RSS bytes | GPU bytes |
 |---|---:|---:|---:|---:|
-| Synthetic fixture (pending final run) | pending | pending | pending | n/a (CPU) |
+| Fixture `preprocess_data` (1000/100/40 subjects, CPU) | 0.42 | 617,737,216 | 792,940,544 | null (CPU) |
+| Fixture `pretrain` (TEST_CONFIG, 1 torch thread) | 29.8 | 925,522,944 | 1,216,294,912 | null (CPU) |
+| Fixture `infer_trajectories` (40 keys × 8 samples) | 12.3 | 845,872,128 | 1,161,105,408 | null (CPU) |
+| Fixture `predict_zero_shot_materialized` | 0.82 | 867,859,456 | 1,183,617,024 | null (CPU) |
+| MEDS-DEV gate, whole `meds-dev-model` run (default config, GPU) | ≈ 56 (pytest wall) | per-manifest in the test's tmp dir | — | not recorded by core |
 
 ## Environment and provenance
 
-- Algorithm commit and dirty state: recorded per artifact manifest; branch `worktree-curiosity-zero-shot`.
+- Algorithm commit and dirty state: recorded per artifact manifest; branch `worktree-curiosity-zero-shot`
+  (local and MEDS-DEV gates run on commit `cf5db67` plus the report/demo-config update).
 - Dataset/task identifiers: synthetic fixture only; MIMIC-IV demo pending approval.
 - Dataset, task, and predicate revisions: MEDS-DEV pinned by core (`19a8aa34`) for MEDS-DEV and demo tests.
 - Task-bundle kind (clinical ACES tasks / sampled code-by-horizon tasks) and the commit of the tool that built it:
@@ -208,3 +225,10 @@
   O(keys × n × tokens). Prediction duplicates each key's real history n times, in chunks of 256 keys.
 - Generated diagnosis sub-token sequences can form ICD codes that do not exist; they are emitted as generated
   (invalid-token counts are recorded per sample).
+- `aces-relaxations` is a private McDermottHealthAI repository with no release, so installation (CI, MEDS-DEV,
+  cluster) needs GitHub access to it. The GitHub Actions CI will fail at `uv sync` without a token.
+- On aarch64, `uv pip check` in `scripts/check_distribution.sh` flags torch's `nvidia-cusparselt-cu13` wheel
+  (platform tag `manylinux2014_sbsa`) as "built for a different platform". This is NVIDIA's nonstandard
+  tag for aarch64 servers; the package imports and runs on the GB10.
+- Fixture tests run on CPU with one torch thread for reproducibility of the label-blind rerun. GPU runs are not
+  bitwise reproducible.
