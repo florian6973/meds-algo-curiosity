@@ -18,7 +18,7 @@ metadata:
 commands:
   unsupervised:
     train: |-
-      curiosity-meds preprocess_data --profile zero_shot_materialized external_meds_dir={dataset_dir} external_predicates_file={predicates_path} output_data_dir={output_dir}/data do_overwrite=true
+      curiosity-meds preprocess_data --profile zero_shot_materialized external_meds_dir={dataset_dir} output_data_dir={output_dir}/data do_overwrite=true
       curiosity-meds pretrain --profile zero_shot_materialized input_data_dir={output_dir}/data output_pretrained_algorithm_dir={output_dir}/pretrained
   supervised:
     train: null

@@ -9,8 +9,17 @@ description = "Curiosity (CoMET) generative medical event model: Qwen2 decoder p
 readme = "README.md"
 authors = [{name = "Florent Pollet", email = "flo1.raymond@gmail.com"}]
 
-requires-python = ">=3.11"
-dependencies = ["pyyaml>=6", "meds-algorithm[data]==0.4.0a5"]
+requires-python = ">=3.12"
+dependencies = [
+  "pyyaml>=6",
+  "meds-algorithm[data]==0.4.0a5",
+  # Reviewed revision (no tag or PyPI release yet): ACES evaluation of the task on real history + futures.
+  "aces-relaxations @ git+https://github.com/McDermottHealthAI/aces-relaxations.git@adf435787169047c6e0de662461b4c0d9932608e",
+  "numpy>=1.26",
+  "torch>=2.6",
+  # Qwen2ForCausalLM, the paper's architecture (Sec. 5.3.1).
+  "transformers>=4.51",
+]
 
 [project.optional-dependencies]
 orchestration = ["meds-algorithm[orchestration]==0.4.0a5"]
@@ -22,6 +31,9 @@ Repository = "https://github.com/florian6973/meds-algo-curiosity"
 
 [project.scripts]
 curiosity-meds = "curiosity_meds.__main__:main"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/curiosity_meds"]

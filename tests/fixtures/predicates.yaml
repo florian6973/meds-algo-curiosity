@@ -1,0 +1,6 @@
+# Dataset predicates for the synthetic fixture, written like MEDS-DEV's MIMIC-IV predicates.
+predicates:
+  icu_admission:
+    code: { regex: "^ICU_ADMISSION//.*" }
+  icu_discharge:
+    code: { regex: "^ICU_DISCHARGE//.*" }

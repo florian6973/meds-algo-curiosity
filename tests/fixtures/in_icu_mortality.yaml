@@ -1,0 +1,34 @@
+# Synthetic-fixture task with the window structure of MEDS-DEV's mortality/in_icu/first_24h: predict at
+# ICU admission + 24h; the 24-48h gap must be free of ICU discharge/death (a post-prediction criterion); the
+# label is death before the ICU discharge. Predicates marked ??? are bound from predicates.yaml.
+predicates:
+  icu_admission: ???
+  icu_discharge: ???
+  death:
+    code: { regex: "MEDS_DEATH.*" }
+  discharge_or_death:
+    expr: or(icu_discharge, death)
+
+trigger: icu_admission
+
+windows:
+  input:
+    start: null
+    end: trigger + 24h
+    start_inclusive: True
+    end_inclusive: True
+    index_timestamp: end
+  gap:
+    start: trigger
+    end: start + 48h
+    start_inclusive: False
+    end_inclusive: True
+    has:
+      icu_admission: (None, 0)
+      discharge_or_death: (None, 0)
+  target:
+    start: gap.end
+    end: start -> discharge_or_death
+    start_inclusive: False
+    end_inclusive: True
+    label: death
