@@ -24,7 +24,7 @@
 
 | Missing/conflicting detail | Sources consulted | Options and scientific consequences | Choice/rationale and status | User decision or source resolution | Affected code/tests/results |
 |---|---|---|---|---|---|
-| Which MIMIC-IV codes form the vocabulary (Epic vocabularies ICD-10-CM/ATC/LOINC/CPT do not exist in MIMIC MEDS) | Paper Sec. 5.2, 5.2.8, Table 2; MIMIC-IV-MEDS 0.1.0 `event_configs.yaml`; MEDS-DEV MIMIC predicates | All train codes (any predicate generable, deviates from exclusions) / paper categories only (tasks on excluded codes unanswerable) / paper + NDC→ATC/ICD-9→10/LOINC remap (lossy back-mapping) | Paper categories only, mapped to MIMIC codes (`MIMIC_IV_CATEGORIES` in `config.py`); tasks whose post-prediction predicates match no vocabulary code are rejected | **Confirmed** by Florent: "Paper categories only" | `config.py`, `_tokenizer.py`, `_check_generable`; `test_fit_keeps_paper_categories_and_train_deciles`, `test_tasks_needing_ungenerable_codes_are_rejected` |
+| Which MIMIC-IV codes form the vocabulary (Epic vocabularies ICD-10-CM/ATC/LOINC/CPT do not exist in MIMIC MEDS) | Paper Sec. 5.2, 5.2.8, Table 2; MIMIC-IV-MEDS 0.1.0 `event_configs.yaml`; MEDS-DEV MIMIC predicates | All train codes (any predicate generable, deviates from exclusions) / paper categories only (tasks on excluded codes unanswerable) / paper + NDC→ATC/ICD-9→10/LOINC remap (lossy back-mapping) | Paper categories only. The category semantics (top-k, numeric, ICD split) are in `config.py`; the MIMIC code mapping is in the dataset category file `datasets/MIMIC-IV.yaml`; tasks whose post-prediction predicates match no vocabulary code are rejected | **Confirmed** by Florent: "Paper categories only" | `config.py`, `datasets/MIMIC-IV.yaml`, `_tokenizer.py`, `_check_generable`; `test_fit_keeps_paper_categories_and_train_deciles`, `test_tasks_needing_ungenerable_codes_are_rejected` |
 | Applying the token scheme to MIMIC codes (no ATC; ICD-9 and ICD-10 mixed; shifted dates) | Paper Sec. 5.2.1-5.2.5 | Split ICD only / no splitting / also keep years-since-1970 | Split ICD-9 and ICD-10 diagnoses into 3/2/2-character sub-tokens; other codes whole; drop years-since-1970 (MIMIC dates are shifted per patient) | **Confirmed**: "Split ICD only, rest whole" | `_tokenizer.py`; `test_vectorized_transform_matches_scalar_gaps_and_roundtrips` |
 | Model size and training budget (paper: 62M-1B params, ~1,000 tokens/param, unreachable on MIMIC) | Paper Sec. 5.3.1, Tables 1 and 3 | S / M / L reference; fixed steps vs early stopping | capacity 1.0 = Curiosity-S (6 layers, 768, 12 heads, MLP 3072, context 8,192); width scales with capacity; up to `max_epochs` with early stopping on the tuning-split next-token loss | **Confirmed**: "S + tuning early stop" | `config.py`, `_model.py`; `test_capacity_and_dropout_control_the_qwen2_architecture` |
 | Samples per key and generation stopping for a task-independent `infer_trajectories` | Paper Sec. 2.7.2, 5.5, 5.6 (n = 20-80; 2,000 tokens; "retried up to two times"; temperature 1) | n = 20 / 64 / 80 | n = 20, temperature 1, no top-k/top-p, up to 3 attempts × 2,000 new tokens, stop at MEDS_DEATH, separator, or prediction_time + 365 d; prompt = real events with time ≤ prediction_time | **Confirmed**: "n = 20"; the prompt cutoff and stopping rules were in the same confirmed question | `config.py`, `_model.generate`, `_prompt`; `test_generation_stops_at_horizon_or_stop_token`, `test_prompt_stops_at_prediction_time_and_states_the_elapsed_gap` |
@@ -68,7 +68,7 @@
 | Top 1,000 numeric labs + 10 shared decile tokens (Sec. 5.2.4) | ported | `lab` category, `quantiles` | `LAB//RESULT//*` hosp labs, train deciles per code |
 | Medication orders as ATC 3/2/2 (Sec. 5.2.5) | adapted | `medication` category | Pharmacy order codes kept whole (no ATC in MIMIC) |
 | Top 1,500 billed procedures (Sec. 5.2.6) | adapted | `procedure` category | ICD procedures, HCPCS, and ICU procedure starts, pooled top 1,500 |
-| Exclusions: notes, vitals, administrations, free text (Sec. 5.2.8) | ported | category regexes | chartevents, eMAR, infusions, outputs, OMR, DRG are excluded |
+| Exclusions: notes, vitals, administrations, free text (Sec. 5.2.8) | ported | `datasets/MIMIC-IV.yaml` | chartevents, eMAR, infusions, outputs, OMR, DRG are excluded |
 | Death | adapted | `death` category, stop token | Not a token type in the paper; required by MIMIC mortality tasks (confirmed category list) |
 | ETHOS time tokens; geometric-mean time decoding (Sec. 5.2.7, 5.5) | ported | `TIME_BUCKETS`, `_token_seconds` | Bucket edges from ETHOS (see decision) |
 | Qwen2 decoder, random init, pre-LN/SwiGLU/RoPE (Sec. 5.3.1) | ported | `_model.build_model` | Tied embeddings derived from Table 1 |
@@ -117,11 +117,24 @@
 
 - MEDS assumptions: a split-sharded MEDS dataset (`data/<split>/*.parquet`) with `subject_id`, `time`, `code`,
   `numeric_value`; a `train` split is required, `tuning` is optional (early stopping). `MEDS_BIRTH` gives age;
-  static `GENDER//*` codes give sex; an optional `race` column (MIMIC-IV-MEDS puts it on admission rows) gives
-  race. MIMIC-IV-MEDS 0.1.0 code conventions are encoded in `MIMIC_IV_CATEGORIES`. Another dataset needs its own
-  `categories` through `config_file`, and its codes must be validated.
-- Required predicate names: none for preprocessing (it consumes no predicates; the dataset predicates argument was
-  removed from the preprocess command). Prediction needs the task's predicates, as MEDS-DEV binds them: the
+  sex comes from the category file's `curiosity_sex` codes; an optional `race` column (MIMIC-IV-MEDS puts it on
+  admission rows) gives race.
+- Dataset category files: dataset code knowledge lives only in a YAML file of ACES plain predicates, one per
+  configured category (`curiosity_sex`, `curiosity_death`, `curiosity_encounter`, `curiosity_diagnosis`,
+  `curiosity_lab`, `curiosity_medication`, `curiosity_procedure`). `CuriosityConfig.categories` holds only the
+  paper's dataset-independent semantics: order, top-k, numeric, ICD split. Preprocessing selects the file as follows:
+  1. `additional_predicates_file` when set (core composes it, records source and resolved digests, and keeps
+     `resolved_feature_predicates.yaml` in the prepared-data artifact);
+  2. otherwise the bundled `src/curiosity_meds/datasets/<dataset_name>.yaml`, where `dataset_name` comes from the
+     MEDS dataset's own `metadata/dataset.json` (MIMIC-IV-MEDS writes `MIMIC-IV`, demo and full data). This route
+     lets MEDS-DEV runs, whose `model.yaml` is dataset-independent and cannot pass a dataset name, pick the
+     right mapping;
+  3. otherwise preprocessing fails and names the bundled datasets.
+  The chosen file's path, digest and route are in `payload.json`, and the predicates themselves are frozen into
+  `vocabulary.json`. Only `MIMIC-IV.yaml` is bundled. eICU, NWICU and others need their own file, with
+  `split_icd` disabled unless their diagnosis codes are bare ICD codes.
+- Required predicate names: preprocessing needs the seven `curiosity_*` category predicates above and no task or
+  dataset predicates (the dataset predicates argument was removed from the preprocess command). Prediction needs the task's predicates, as MEDS-DEV binds them: the
   task criteria plus `external_predicates_file` (MEDS-DEV MIMIC-IV `predicates.yaml` for the demo, which
   supplies `icu_admission`/`icu_discharge`).
 - Predicate interpretation and derived features: predicates are interpreted only by ACES on real history +
@@ -132,7 +145,7 @@
 
 | Command | Payload format/version | Compatibility check | Inputs/provenance |
 |---|---|---|---|
-| `preprocess_data` | `curiosity-tokens/v1`: `vocabulary.json`, `tokens/<split>/<shard>.parquet` (`subject_id`, `tokens`, `times`), `payload.json` | — | `payload.json`: vocabulary digest, fitted split (`train`), SHA-256 of every MEDS shard, per-split subject/token counts |
+| `preprocess_data` | `curiosity-tokens/v1`: `vocabulary.json`, `tokens/<split>/<shard>.parquet` (`subject_id`, `tokens`, `times`), `payload.json` | — | `payload.json`: vocabulary digest, fitted split (`train`), category-file route/path/digest, SHA-256 of every MEDS shard, per-split subject/token counts |
 | `pretrain` | `curiosity-qwen2/v1`: `model/` (safetensors + Qwen2 config), `payload.json` | data payload format | vocabulary digest; per-epoch train/tuning loss, optimizer steps, measured parameter count, train tokens per epoch, device |
 | `infer_trajectories` | `curiosity-trajectories/v1`: `events.parquet`, `samples.parquet`, `payload.json` | data and model payload formats; model vocabulary digest == data vocabulary digest; core config check | vocabulary digest; n, sampling policy, horizon, token budget, prompt rule, time units, stop reasons |
 | `predict_zero_shot_materialized` | `curiosity-predictions/v1`: `predictions.parquet`, `unresolved_keys.arrow`, `relaxations.yaml` | trajectories format and vocabulary digest; every requested key has exactly `n_samples` samples; task generability | core records task provenance and semantics digest |
@@ -173,7 +186,7 @@
 
 | Suite/run | Exact command | Pass/skip counts | Coverage/result |
 |---|---|---|---|
-| Local | `uv run pytest -rs` | 26 passed, 2 skipped (the opt-in `meds_dev` and `real_data` tests: "explicitly select -m meds_dev or -m real_data"); 0 `algorithm_stub` skips | Conformance (full lifecycle, key coverage, label-blind rerun with identical probabilities, split canaries absent from fitted codes, task digest, ledger), primary behavior, 17 algorithm-specific tests |
+| Local | `uv run pytest -rs` | 28 passed, 2 skipped (the opt-in `meds_dev` and `real_data` tests: "explicitly select -m meds_dev or -m real_data"); 0 `algorithm_stub` skips | Conformance (full lifecycle, key coverage, label-blind rerun with identical probabilities, split canaries absent from fitted codes, task digest, ledger), primary behavior, 19 algorithm-specific tests |
 | Distribution | `bash scripts/check_distribution.sh` | build, `twine check`, installed `wheel_smoke.py` (plain and `--orchestration`) pass; `uv pip check` reports a false positive (see Known limitations) | Installed imports, CLI, bundled defaults, aces-relaxations import, Qwen2 build |
 | MEDS-DEV | `uv run pytest -m meds_dev -rs` | 1 passed, 27 deselected | `meds-dev-model mode=full dataset_type=full` with MEDS-DEV @ `19a8aa34`, model.yaml defaults on GPU, fixture 200/20/10; held-out keys covered |
 | MIMIC-IV demo | `uv run pytest -m real_data -rs` | not run: awaiting human approval | — |
@@ -205,7 +218,7 @@ GB10 GPU, and predicts the held-out split. The demo result is a scale/pipeline c
 ## Environment and provenance
 
 - Algorithm commit and dirty state: recorded per artifact manifest; branch `worktree-curiosity-zero-shot`
-  (local and MEDS-DEV gates run on commit `cf5db67` plus the report/demo-config update).
+  (gates rerun after moving the category mapping to dataset files; see Verification).
 - Dataset/task identifiers: synthetic fixture only; MIMIC-IV demo pending approval.
 - Dataset, task, and predicate revisions: MEDS-DEV pinned by core (`19a8aa34`) for MEDS-DEV and demo tests.
 - Task-bundle kind (clinical ACES tasks / sampled code-by-horizon tasks) and the commit of the tool that built it:

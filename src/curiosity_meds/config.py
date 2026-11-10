@@ -9,40 +9,39 @@ from meds_algorithm import NNConfig
 
 @dataclass(frozen=True)
 class CodeCategory:
-    """One event family the tokenizer keeps (paper Sec. 5.2). Events are assigned to the first matching category.
+    """One event family the tokenizer keeps (paper Sec. 5.2, Table 2); dataset-independent.
 
-    ``pattern`` is a regular expression over MEDS codes. ``top_k`` keeps only the most frequent training-split
-    codes (paper: top 1,000 labs, top 1,500 procedures); other matching codes become the unknown token.
-    ``numeric`` keeps only events with a numeric value and appends a shared decile token (paper Sec. 5.2.4).
-    ``split_icd`` splits ``<prefix>//<ICD code>`` into 3/2/2-character sub-tokens (paper Sec. 5.2.3).
+    Which codes belong to it is dataset knowledge: the ACES plain predicate ``curiosity_<name>`` in a dataset
+    category file (``datasets/<dataset_name>.yaml`` or ``additional_predicates_file``). Events take the first
+    matching category. ``top_k`` keeps the most frequent training-split codes (paper: 1,000 labs, 1,500
+    procedures); other matching codes become the unknown token. ``numeric`` keeps only events with a numeric
+    value and appends a shared decile token (Sec. 5.2.4). ``split_icd`` splits ``<prefix>//<ICD code>`` into
+    3/2/2-character sub-tokens (Sec. 5.2.3); enable it only where the dataset's codes are bare ICD codes.
     """
 
     name: str
-    pattern: str
     top_k: int | None = None
     numeric: bool = False
     split_icd: bool = False
 
+    @property
+    def predicate(self) -> str:
+        return f"curiosity_{self.name}"
+
     def validate(self):
-        re.compile(self.pattern)
-        if not self.name or (self.top_k is not None and self.top_k < 1):
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", self.name) or (self.top_k is not None and self.top_k < 1):
             raise ValueError(f"Invalid code category {self!r}")
 
 
-# Paper event families mapped onto MIMIC-IV-MEDS 0.1.0 codes (the MEDS-DEV demo and full-data ETL). Excluded,
-# as in the paper (Sec. 5.2.8): chartevents (LAB//<itemid>), eMAR administrations, infusions, outputs, OMR,
-# DRG, specimen collection, medication stops. Other datasets supply their own mapping through config_file.
-MIMIC_IV_CATEGORIES = (
-    CodeCategory("sex", r"^GENDER//"),
-    CodeCategory("death", r"^MEDS_DEATH$"),
-    CodeCategory(
-        "encounter",
-        r"^(HOSPITAL_ADMISSION//|HOSPITAL_DISCHARGE//|ICU_ADMISSION//|ICU_DISCHARGE//|TRANSFER_TO//|ED_REGISTRATION$|ED_OUT$)",
-    ),
-    CodeCategory("diagnosis", r"^DIAGNOSIS//ICD//(9|10)//", split_icd=True),
-    CodeCategory("lab", r"^LAB//RESULT//", top_k=1000, numeric=True),
-    CodeCategory("medication", r"^MEDICATION//START//"),
-    CodeCategory("procedure", r"^(PROCEDURE//ICD//|HCPCS//|PROCEDURE//START//)", top_k=1500),
+# The paper's event categories, in matching order.
+PAPER_CATEGORIES = (
+    CodeCategory("sex"),
+    CodeCategory("death"),
+    CodeCategory("encounter"),
+    CodeCategory("diagnosis", split_icd=True),
+    CodeCategory("lab", top_k=1000, numeric=True),
+    CodeCategory("medication"),
+    CodeCategory("procedure", top_k=1500),
 )
 
 
@@ -63,7 +62,7 @@ class CuriosityConfig(NNConfig):
     weight_decay: float = 0.1
 
     # Tokenization (paper Sec. 5.2, Table 2).
-    categories: tuple[CodeCategory, ...] = MIMIC_IV_CATEGORIES
+    categories: tuple[CodeCategory, ...] = PAPER_CATEGORIES
     num_quantiles: int = 10
     age_bucket_years: int = 5
     race_column: str | None = "race"

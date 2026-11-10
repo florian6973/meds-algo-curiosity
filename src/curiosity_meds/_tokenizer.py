@@ -15,8 +15,12 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from collections.abc import Mapping
+from typing import Any
+
 import numpy as np
 import polars as pl
+from aces.config import PlainPredicateConfig
 
 from .config import CuriosityConfig
 
@@ -70,26 +74,38 @@ def _token_seconds(name: str) -> float:
     return math.sqrt(low * high)
 
 
-def _categorize(config: CuriosityConfig) -> pl.Expr:
-    expression = pl.lit(None, dtype=pl.String)
-    for category in reversed(config.categories):
-        expression = pl.when(pl.col("code").str.contains(category.pattern)).then(pl.lit(category.name)).otherwise(expression)
-    return expression.alias("category")
+def category_predicates(config: CuriosityConfig, predicates: Mapping[str, Any]) -> tuple[tuple[str, dict], ...]:
+    """``(category, ACES plain-predicate spec)`` in matching order, from a dataset category file's predicates."""
+    missing = [c.predicate for c in config.categories if c.predicate not in predicates]
+    if missing:
+        raise ValueError(f"The dataset category file does not define {missing}")
+    selected = []
+    for category in config.categories:
+        spec = dict(predicates[category.predicate])
+        if "code" not in spec or "expr" in spec or spec.get("other_cols"):
+            raise ValueError(f"{category.predicate} must be an ACES plain predicate on code/numeric_value")
+        PlainPredicateConfig(**spec).MEDS_eval_expr()  # rejects malformed code fields early
+        selected.append((category.name, spec))
+    return tuple(selected)
 
 
-def _kept_events(frame: pl.LazyFrame, config: CuriosityConfig) -> pl.LazyFrame:
-    numeric = [category.name for category in config.categories if category.numeric]
+def _kept_events(frame: pl.LazyFrame, categories: tuple[tuple[str, dict], ...], numeric: tuple[str, ...]) -> pl.LazyFrame:
+    category = pl.lit(None, dtype=pl.String)
+    for name, spec in reversed(categories):
+        category = pl.when(PlainPredicateConfig(**spec).MEDS_eval_expr()).then(pl.lit(name)).otherwise(category)
     return (
-        frame.with_columns(_categorize(config))
+        frame.with_columns(category.alias("category"))
         .filter(pl.col("category").is_not_null())
-        .filter(~pl.col("category").is_in(numeric) | (pl.col("numeric_value").is_not_null() & pl.col("numeric_value").is_finite()))
+        .filter(~pl.col("category").is_in(list(numeric)) | (pl.col("numeric_value").is_not_null() & pl.col("numeric_value").is_finite()))
     )
 
 
 @dataclass(frozen=True)
 class _Vocabulary:
-    """Fitted tokenizer state: token strings (index = id), per-code decile edges and training codes."""
+    """Fitted tokenizer state: category predicates, token strings (index = id), deciles and training codes."""
 
+    categories: tuple[tuple[str, dict], ...]  # (category, ACES plain predicate) in matching order
+    numeric_categories: tuple[str, ...]
     tokens: tuple[str, ...]
     quantiles: dict[str, tuple[float, ...]]  # code -> (min, cut_1..cut_{q-1}, max) on training values
     split_codes: tuple[str, ...]  # training ICD codes represented by sub-tokens
@@ -97,8 +113,10 @@ class _Vocabulary:
     age_bucket_years: int
 
     @classmethod
-    def fit(cls, train: pl.LazyFrame, config: CuriosityConfig, race: pl.LazyFrame | None) -> _Vocabulary:
-        kept = _kept_events(train, config)
+    def fit(cls, train: pl.LazyFrame, config: CuriosityConfig, categories: tuple[tuple[str, dict], ...],
+            race: pl.LazyFrame | None) -> _Vocabulary:
+        numeric_categories = tuple(c.name for c in config.categories if c.numeric)
+        kept = _kept_events(train, categories, numeric_categories)
         counts = kept.group_by("category", "code").agg(pl.len().alias("count")).collect()
         codes: list[str] = []
         split_codes: list[str] = []
@@ -106,9 +124,7 @@ class _Vocabulary:
             ranked = counts.filter(pl.col("category") == category.name).sort(["count", "code"], descending=[True, False])
             selected = ranked.head(category.top_k) if category.top_k else ranked
             (split_codes if category.split_icd else codes).extend(sorted(selected["code"].to_list()))
-        numeric_codes = set(
-            counts.filter(pl.col("category").is_in([c.name for c in config.categories if c.numeric]))["code"]
-        ) & set(codes)
+        numeric_codes = set(counts.filter(pl.col("category").is_in(list(numeric_categories)))["code"]) & set(codes)
         q = config.num_quantiles
         quantiles = {}
         if numeric_codes:
@@ -142,11 +158,13 @@ class _Vocabulary:
             *(f"CODE//{head}" for head in sorted(heads)),
             *sorted(subs),
         )
-        return cls(tuple(tokens), quantiles, tuple(split_codes), q, config.age_bucket_years)
+        return cls(categories, numeric_categories, tuple(tokens), quantiles, tuple(split_codes), q, config.age_bucket_years)
 
     # ---- persistence -------------------------------------------------------------------------------------
     def save(self, path: Path) -> None:
         path.write_text(json.dumps({
+            "categories": [[name, spec] for name, spec in self.categories],
+            "numeric_categories": list(self.numeric_categories),
             "tokens": list(self.tokens),
             "quantiles": {code: list(edges) for code, edges in self.quantiles.items()},
             "split_codes": list(self.split_codes),
@@ -158,6 +176,8 @@ class _Vocabulary:
     def load(cls, path: Path) -> _Vocabulary:
         value = json.loads(path.read_text())
         return cls(
+            tuple((name, spec) for name, spec in value["categories"]),
+            tuple(value["numeric_categories"]),
             tuple(value["tokens"]),
             {code: tuple(edges) for code, edges in value["quantiles"].items()},
             tuple(value["split_codes"]),
@@ -177,13 +197,13 @@ class _Vocabulary:
         } | set(self.split_codes) | set(self.quantiles)
 
     # ---- transform ---------------------------------------------------------------------------------------
-    def transform(self, events: pl.DataFrame, config: CuriosityConfig, race: pl.DataFrame | None) -> pl.DataFrame:
+    def transform(self, events: pl.DataFrame, race: pl.DataFrame | None) -> pl.DataFrame:
         """One row per subject: ``tokens`` (ids) and ``times`` (event time per token; null for the prefix)."""
         ids = self.ids
         births = (
             events.filter(pl.col("code") == "MEDS_BIRTH").group_by("subject_id").agg(pl.col("time").min().alias("birth"))
         )
-        kept = _kept_events(events.lazy(), config).collect()
+        kept = _kept_events(events.lazy(), self.categories, self.numeric_categories).collect()
         timed = kept.filter(pl.col("time").is_not_null()).with_row_index("_order").sort(
             "subject_id", "time", "_order", maintain_order=True
         )

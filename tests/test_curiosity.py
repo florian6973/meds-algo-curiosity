@@ -1,5 +1,6 @@
 """Curiosity-specific behavior: tokenization, configuration effects, cutoffs, sampling and Eq. 2 aggregation."""
 
+import dataclasses
 import json
 import subprocess
 import sys
@@ -9,16 +10,47 @@ import numpy as np
 import polars as pl
 import pytest
 import torch
+import yaml
 from aces.config import TaskExtractorConfig
+from meds_algorithm.requests import PreprocessDataRequest
 
-from curiosity_meds import CuriosityConfig
+from curiosity_meds import Curiosity, CuriosityConfig
 from curiosity_meds import _model
-from curiosity_meds._tokenizer import SIX_MONTHS, _token_seconds, _Vocabulary, gap_tokens
-from curiosity_meds.curiosity_meds import _aggregate, _check_generable, _prompt
+from curiosity_meds._tokenizer import SIX_MONTHS, _token_seconds, _Vocabulary, category_predicates, gap_tokens
+from curiosity_meds.config import CodeCategory
+from curiosity_meds.curiosity_meds import DATASETS_DIR, _aggregate, _check_generable, _prompt
 
 from .e2e import PREDICATES_FILE, TASK_FILE, TEST_CONFIG
 
 T0 = datetime(2150, 1, 1)
+MIMIC_CATEGORIES = category_predicates(
+    CuriosityConfig(), yaml.safe_load((DATASETS_DIR / "MIMIC-IV.yaml").read_text())["predicates"]
+)
+
+
+def test_category_file_is_chosen_by_dataset_name_or_explicit_file(tmp_path):
+    def request(name):
+        (tmp_path / name / "metadata").mkdir(parents=True)
+        (tmp_path / name / "metadata" / "dataset.json").write_text(json.dumps({"dataset_name": name}))
+        return PreprocessDataRequest.from_arguments({"external_meds_dir": str(tmp_path / name),
+                                                     "output_data_dir": str(tmp_path / "out")})
+
+    path, source = Curiosity(CuriosityConfig())._category_file(request("MIMIC-IV"))
+    assert path == DATASETS_DIR / "MIMIC-IV.yaml" and "dataset_name" in source
+    with pytest.raises(ValueError, match="No Curiosity category file for dataset_name 'eICU'"):
+        Curiosity(CuriosityConfig())._category_file(request("eICU"))
+    explicit = Curiosity(CuriosityConfig(additional_predicates_file=DATASETS_DIR / "MIMIC-IV.yaml"))
+    resolved = tmp_path / "resolved_feature_predicates.yaml"  # what the runner composes into staging
+    composed = dataclasses.replace(request("other"), predicates_file=resolved)
+    assert explicit._category_file(composed) == (resolved, "additional_predicates_file")
+
+
+def test_category_file_must_define_every_configured_category():
+    with pytest.raises(ValueError, match="curiosity_procedure"):
+        category_predicates(CuriosityConfig(), {f"curiosity_{n}": {"code": "X"} for n in ("sex", "death", "encounter",
+                                                                                           "diagnosis", "lab", "medication")})
+    with pytest.raises(ValueError, match="plain predicate"):
+        category_predicates(CuriosityConfig(categories=(CodeCategory("lab"),)), {"curiosity_lab": {"expr": "or(a, b)"}})
 
 
 def _events(rows):
@@ -40,7 +72,7 @@ TRAIN = _events([
 
 @pytest.fixture(scope="module")
 def vocabulary():
-    return _Vocabulary.fit(TRAIN.lazy(), CuriosityConfig(), None)
+    return _Vocabulary.fit(TRAIN.lazy(), CuriosityConfig(), MIMIC_CATEGORIES, None)
 
 
 @pytest.mark.parametrize(("seconds", "expected"), [
@@ -71,7 +103,7 @@ def test_vectorized_transform_matches_scalar_gaps_and_roundtrips(vocabulary):
         (9, T0 + timedelta(days=200), "DIAGNOSIS//ICD//10//E1165", None),
         (9, T0 + timedelta(days=201), "LAB//RESULT//99999//mg/dL", 1.0),  # unseen lab -> [UNK], no decile
     ])
-    row = vocabulary.transform(held_out, CuriosityConfig(), None).row(0, named=True)
+    row = vocabulary.transform(held_out, None).row(0, named=True)
     tokens = [vocabulary.tokens[i] for i in row["tokens"]]
     assert tokens == [
         "[BOS]", "CODE//HOSPITAL_ADMISSION//EW EMER.//EMERGENCY ROOM", *gap_tokens(180), "CODE//LAB//RESULT//50912//mg/dL",
@@ -96,7 +128,7 @@ def test_decode_counts_malformed_sequences(vocabulary):
 
 
 def test_prompt_stops_at_prediction_time_and_states_the_elapsed_gap(vocabulary):
-    history = vocabulary.transform(TRAIN, CuriosityConfig(), None).row(0, named=True)
+    history = vocabulary.transform(TRAIN, None).row(0, named=True)
     cutoff = T0 + timedelta(hours=5, minutes=30)
     prompt = [vocabulary.tokens[i] for i in _prompt(history, cutoff, vocabulary)]
     assert prompt.count("CODE//LAB//RESULT//50912//mg/dL") == 6  # hours 0..5 only
@@ -172,7 +204,7 @@ def test_aggregate_extends_equation_2_with_fallback():
 def test_tasks_needing_ungenerable_codes_are_rejected(vocabulary, tmp_path):
     _check_generable(TaskExtractorConfig.load(TASK_FILE, PREDICATES_FILE), _Vocabulary.fit(
         _events([(1, T0, "ICU_ADMISSION//MICU", None), (1, T0 + timedelta(days=3), "ICU_DISCHARGE//MICU", None),
-                 (2, T0, "MEDS_DEATH", None)]).lazy(), CuriosityConfig(), None))
+                 (2, T0, "MEDS_DEATH", None)]).lazy(), CuriosityConfig(), MIMIC_CATEGORIES, None))
     task = tmp_path / "task.yaml"
     task.write_text(TASK_FILE.read_text().replace('regex: "MEDS_DEATH.*"', 'regex: "^LAB//220045//"'))
     with pytest.raises(ValueError, match="cannot generate"):

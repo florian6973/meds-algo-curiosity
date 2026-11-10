@@ -26,8 +26,13 @@ def main():
     from aces_relaxations import extract, normalize  # noqa: F401 - the task evaluation dependency must import
     from curiosity_meds._model import build_model
 
+    import yaml
+    from curiosity_meds._tokenizer import category_predicates
+    from curiosity_meds.curiosity_meds import DATASETS_DIR
+
     config = CuriosityConfig()
-    assert {category.name for category in config.categories} >= {"diagnosis", "lab", "medication", "procedure", "death"}
+    mimic = yaml.safe_load((DATASETS_DIR / "MIMIC-IV.yaml").read_text())["predicates"]
+    assert [name for name, _ in category_predicates(config, mimic)] == [c.name for c in config.categories]
     with tempfile.TemporaryDirectory() as directory:
         assert CuriosityConfig.load(config.save(Path(directory) / "config.json")) == config
     assert build_model(CuriosityConfig(capacity=1 / 12, num_layers=1), 32, 0).config.hidden_size == 64

@@ -20,9 +20,9 @@ def algorithm_case():
         name="curiosity_meds",
         create_repository=create_repository,
         configurations=(
-            CuriosityConfig(),  # paper defaults: Curiosity-S, MIMIC-IV categories, n=20
+            CuriosityConfig(),  # paper defaults: Curiosity-S, paper categories, n=20
             TEST_CONFIG,
-            CuriosityConfig(capacity=2.0, categories=(CodeCategory("all", ".*", top_k=5000, numeric=True),),
+            CuriosityConfig(capacity=2.0, categories=(CodeCategory("all", top_k=5000, numeric=True),),
                             race_column=None, horizon_days=730.0, n_samples=64),
         ),
         stub_profiles=STUB_PROFILES,

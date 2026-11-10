@@ -14,7 +14,7 @@ from meds_algorithm.conformance.types import E2EResult, MEDSDevRun
 
 from curiosity_meds import CuriosityConfig
 from curiosity_meds._tokenizer import _Vocabulary
-from curiosity_meds.curiosity_meds import create_repository
+from curiosity_meds.curiosity_meds import DATASETS_DIR, create_repository
 
 FIXTURES = Path(__file__).parent / "fixtures"
 TASK_FILE = FIXTURES / "in_icu_mortality.yaml"
@@ -28,6 +28,7 @@ TEST_CONFIG = CuriosityConfig(
     capacity=2 / 12, num_layers=2, learning_rate=3e-3, batch_size=8, sequences_per_step=8, context_length=128,
     max_epochs=25, early_stopping_patience=5, warmup_fraction=0.05, device="cpu",
     n_samples=8, max_new_tokens=48, max_attempts=3, horizon_days=60.0,
+    additional_predicates_file=DATASETS_DIR / "MIMIC-IV.yaml",  # explicit route; MEDS-DEV runs use dataset_name
 )
 # Real data (MIMIC-IV demo): the paper's defaults (Curiosity-S, n=20, 3 x 2,000 tokens, 365 d) on the GPU when
 # available; 8-sequence optimizer steps because the demo's ~100 subjects fill only a few 8,192-token windows.
@@ -92,7 +93,8 @@ def build_fixture(root: Path, *, seed: int = 0, shuffle_outcomes: bool = False, 
     (root / "metadata").mkdir(exist_ok=True)
     frame.select(pl.col("code").unique().sort()).write_parquet(root / "metadata" / "codes.parquet")
     split_of.write_parquet(root / "metadata" / "subject_splits.parquet")
-    (root / "metadata" / "dataset.json").write_text(json.dumps({"dataset_name": "synthetic_icu", "meds_version": "0.4"}))
+    # Synthetic, but in MIMIC-IV-MEDS 0.1.0 code conventions, so it uses the bundled MIMIC-IV category file.
+    (root / "metadata" / "dataset.json").write_text(json.dumps({"dataset_name": "MIMIC-IV", "meds_version": "0.4"}))
     return root, add_split_canaries(root)
 
 
