@@ -2,246 +2,221 @@
 
 ## Source
 
-- Paper: Waxler, Blazek, White, Sneider et al., "Generative Medical Event Models Improve with Scale",
-  arXiv:2508.12104. The model was named CoMET in v1 (2025-08-16), Comet in v2 (2025-09-23) and Curiosity in v3.
-- Exact revision/version: **v3** (2025-11-07), read in full (Sections 1-5, Appendices A-J). The abstract and
-  Table 1 match v1. No code, weights or data were released, and the data (Epic Cosmos) is not public, so this
-  is a **paper-only** port: there is no source package to depend on. Every behavior below is either taken from
-  the paper or an explicitly recorded adaptation.
+- Paper: Nagarathnam et al., "Curiosity-0826-4B: Generative Medical Event Sequence Modeling Across Pediatric and
+  Adult Populations", arXiv:2611.15710 **v1** (2026-11-11), read in full. Its Sec. 2 lists every tokenization change
+  from Curiosity-0226-1B and states that "representations not discussed are unchanged from Curiosity-0226-1B".
+- Unchanged parts follow Curiosity-0226: Waxler et al., "Generative Medical Event Models Improve with Scale",
+  arXiv:2508.12104 **v3** (2025-11-07), Sec. 5 and Appendices A-J. This repository implemented 0226 first
+  (commits up to `9299e39`); it now implements 0826 only.
+- No code, weights or data were released for either paper (Epic Cosmos is not public): this is a **paper-only**
+  port. Every behavior is taken from the papers or is a recorded adaptation.
 - Cited source used for an unspecified detail: ETHOS time tokens (Renc et al. 2024, `ipolharvard/ethos-paper`
-  `ethos/tokenize/special_tokens.py`, commit a1f03ec), which the paper says it adapted.
-- Reused packages: `aces-relaxations` @ `adf435787169047c6e0de662461b4c0d9932608e` (ACES extraction of the task on
-  history + futures), `es-aces` 0.7.4, HF `transformers` (`Qwen2ForCausalLM`, the paper's architecture), `torch`.
-- Template: MEDS_algorithm_template @ `6e8f557` (v0.4.0a2-3); core `meds-algorithm==0.4.0a5`, contract v4.
+  `ethos/tokenize/special_tokens.py`, commit a1f03ec), which the 0226 paper says it adapted.
+- Reused packages: `aces-relaxations==0.1.0` (PyPI; ACES extraction of the task on history + futures), `es-aces`
+  0.7.4, HF `transformers` (`Qwen2ForCausalLM`, the 0226 architecture), `torch`.
+- Template: MEDS_algorithm_template @ `731e759` (temporal-leakage conformance, #52); core `meds-algorithm` @
+  `fa8cdfad1140aebf01bd0b544aee6ff580ec98d3` (main with #21, `conformance/temporal.py`; PyPI 0.4.0a5 predates it),
+  contract v4.
 
 ## Scientific assumptions and decisions
 
 - Mode: **confirmation required** (default; exploratory mode was not enabled).
-- Unresolved blocking questions: none. All material choices below were decided by Florent on 2026-11-09.
-- Provisional choices still requiring review before a faithful-reproduction claim: none are provisional. The
-  routine defaults listed below are flagged for review in the pre-demo gate. Note that this is a MIMIC-IV
-  adaptation of an Epic-Cosmos model, so it cannot reproduce the paper's numbers.
+- Unresolved blocking questions: none block the fixture gates. Two dataset choices for MIMIC-IV await Florent
+  (marked *awaiting confirmation* below): hosp/omr vitals and medication ATC mapping.
+- Provisional choices still requiring review before a faithful-reproduction claim: the vital window anchoring and
+  the stage-2 learning rate (routine, below). This is a MIMIC-IV adaptation of an Epic-Cosmos model and cannot
+  reproduce the paper's numbers.
 
 | Missing/conflicting detail | Sources consulted | Options and scientific consequences | Choice/rationale and status | User decision or source resolution | Affected code/tests/results |
 |---|---|---|---|---|---|
-| Which MIMIC-IV codes form the vocabulary (Epic vocabularies ICD-10-CM/ATC/LOINC/CPT do not exist in MIMIC MEDS) | Paper Sec. 5.2, 5.2.8, Table 2; MIMIC-IV-MEDS 0.1.0 `event_configs.yaml`; MEDS-DEV MIMIC predicates | All train codes (any predicate generable, deviates from exclusions) / paper categories only (tasks on excluded codes unanswerable) / paper + NDC→ATC/ICD-9→10/LOINC remap (lossy back-mapping) | Paper categories only. The category semantics (top-k, numeric, ICD split) are in `config.py`; the MIMIC code mapping is in the dataset category file `datasets/MIMIC-IV.yaml`; tasks whose post-prediction predicates match no vocabulary code are rejected | **Confirmed** by Florent: "Paper categories only" | `config.py`, `datasets/MIMIC-IV.yaml`, `_tokenizer.py`, `_check_generable`; `test_fit_keeps_paper_categories_and_train_deciles`, `test_tasks_needing_ungenerable_codes_are_rejected` |
-| Applying the token scheme to MIMIC codes (no ATC; ICD-9 and ICD-10 mixed; shifted dates) | Paper Sec. 5.2.1-5.2.5 | Split ICD only / no splitting / also keep years-since-1970 | Split ICD-9 and ICD-10 diagnoses into 3/2/2-character sub-tokens; other codes whole; drop years-since-1970 (MIMIC dates are shifted per patient) | **Confirmed**: "Split ICD only, rest whole" | `_tokenizer.py`; `test_vectorized_transform_matches_scalar_gaps_and_roundtrips` |
-| Model size and training budget (paper: 62M-1B params, ~1,000 tokens/param, unreachable on MIMIC) | Paper Sec. 5.3.1, Tables 1 and 3 | S / M / L reference; fixed steps vs early stopping | capacity 1.0 = Curiosity-S (6 layers, 768, 12 heads, MLP 3072, context 8,192); width scales with capacity; up to `max_epochs` with early stopping on the tuning-split next-token loss | **Confirmed**: "S + tuning early stop" | `config.py`, `_model.py`; `test_capacity_and_dropout_control_the_qwen2_architecture` |
-| Samples per key and generation stopping for a task-independent `infer_trajectories` | Paper Sec. 2.7.2, 5.5, 5.6 (n = 20-80; 2,000 tokens; "retried up to two times"; temperature 1) | n = 20 / 64 / 80 | n = 20, temperature 1, no top-k/top-p, up to 3 attempts × 2,000 new tokens, stop at MEDS_DEATH, separator, or prediction_time + 365 d; prompt = real events with time ≤ prediction_time | **Confirmed**: "n = 20"; the prompt cutoff and stopping rules were in the same confirmed question | `config.py`, `_model.generate`, `_prompt`; `test_generation_stops_at_horizon_or_stop_token`, `test_prompt_stops_at_prediction_time_and_states_the_elapsed_gap` |
-| Futures that cannot answer the task: generation ends before the label window closes (paper Eq. 2), or the future violates a post-prediction criterion (absent from paper) | Paper Eq. 2, Sec. 5.6.1/5.6.3/5.6.4 (discard vs retry vs right-censor conflict) | Drop both / drop (1) and count (2) negative / count both negative | Probability = positives / resolved futures (Eq. 2 extended to futures outside the task population) | **Confirmed**: "pos / (futures that answer the task)" | `_aggregate`; `test_aggregate_extends_equation_2_with_fallback` |
-| Key with no resolved future (user first asked for NaN; core 0.4.0a5 rejects non-finite probabilities and has no exclusion policy) | Contract §5; `meds_algorithm/evaluation/predictions.py` | Finite fallback + flag file / fallback 0 / change core | Fallback 0.5, keys listed in `unresolved_keys.arrow`, count recorded in `relaxations.yaml` | **Confirmed**: "Finite fallback + flag file" | `predict_zero_shot_materialized`, `config.fallback_probability` |
-| Time-token bucket edges (paper: "1-5 minutes" to "3-6 months", 13 tokens; edges not listed) | Paper Sec. 5.2.7, Table 2; ETHOS `special_tokens.py` (13 tokens `5m-15m`…`3mt-6mt`, `=6mt`) | ETHOS list with a 1-5 min bucket prepended | ETHOS edges (30-day months) plus `1m-5m`: 13 range tokens plus the "6 month" token. The paper's Table 2 count (13) is one fewer; we assume Table 2 does not count the 6-month token separately. Gaps < 1 min get no token; ≥ 180 d give round(gap/180 d) "6 month" tokens; decoding uses the geometric mean (paper Sec. 5.5) and 180 d for "6 month" | Resolved from the cited source (ETHOS); routine for the count discrepancy | `_tokenizer.py`; `test_gap_tokens_follow_ethos_buckets` |
-| Embedding tying, KV heads, biases | Paper Table 1 parameter counts; Qwen2 defaults | Tied/untied embeddings; GQA ratio | Tied embeddings: they reproduce Table 1 (62M for S at vocab 7,105; 119M for M), untied do not; KV heads = attention heads (GQA ratio unspecified) | Resolved from source (parameter counts); routine for KV heads | `_model.build_model`; parameter-count test |
-| Optimizer details | Paper Sec. 5.3.1 (AdamW, cosine with 10x decay, batch 512 sequences) | — | Routine defaults: peak LR 6e-4, weight decay 0.1, 1% linear warmup, gradient clip 1.0, bf16 autocast on GPU, AdamW betas (0.9, 0.999), attention dropout 0, microbatch 8 × accumulation to 512 sequences, `max_epochs` 20, patience 2 | Routine default (configurable) | `config.py`, `_model.pretrain`; `test_optimizer_and_batching_settings_reach_training` |
-| Out-of-vocabulary codes inside a kept category; labs beyond the top 1,000 | Paper Table 2 lists an unknown token | Drop vs `[UNK]` | `[UNK]` token, no decile | Routine | `_tokenizer.transform` |
-| Generated events at the prediction time / prompt ending between events | Paper prompts end at an event; MEDS prediction times need not | — | The prompt ends with the real elapsed gap tokens (time ≤ prediction_time has no further real events); generated events start the clock at prediction_time and lie strictly after it (+1 µs if no time token precedes them) | Routine (temporal-isolation consequence) | `_prompt`, `_Vocabulary.decode` |
-| Retry semantics and context overflow | Paper Sec. 5.6.4 ("retried up to two times"), Sec. 5.5 (left truncation) | Restart vs continue | Continue: each attempt re-prompts with the latest `context_length − max_new_tokens` tokens of prompt + generation | Routine | `_model.generate` |
-| Race token values | Paper: 7 race tokens, categories unlisted | Map to 7 groups vs raw values | Train-seen raw values of MIMIC's `race` column (first non-null per subject); absent column → no race token | Routine | `_tokenizer`, `Curiosity._race` |
+| Which version to implement | 0226 and 0826 papers | Keep both behind a switch / 0826 only | 0826 only | **Confirmed** by Florent (2026-11-20): "just use the last curiosity version, don't try to make it generic"; pediatric/birth representations must stay supported for other datasets | whole package |
+| Which MIMIC-IV codes form each category | 0826 Sec. 2, Table 2; MIMIC-IV-MEDS 0.1.0 and HEAD `event_configs.yaml`; ETL survey (below) | — | Dataset knowledge lives in `datasets/MIMIC-IV.yaml` (ACES plain predicates; `null` = not recorded) | Category-file approach **confirmed** 2026-11-09 for 0226; MIMIC entries below | `datasets/MIMIC-IV.yaml`, `category_predicates` |
+| Lab collection marker (0826 Sec. 2.3.1) | MIMIC-IV-MEDS ≥ 0.1.0 (`LAB//SPECIMEN_COLLECTED` at charttime, `LAB//RESULT` at storetime), eICU-MEDS (SPECIMEN_DRAWN/RESULT); NWICU, INSPIRE, AUMCdb, SICdb, HiRID, OMOP: one row, no result time | Synthesize a marker at result − 1 s (paper fallback) / use the ETL's own rows | Use the ETL's value-less lab rows as markers; never synthesize. On single-row ETLs a synthesized marker would duplicate every lab at the same time with no information | Resolved from the ETL survey; reported to Florent 2026-11-20 | `lab` category, `events` |
+| Vitals source in MIMIC-IV | MIMIC-IV-MEDS: chartevents (exact times), hosp/omr (00:00 of chartdate; 0.1.0 stores `S/D` text) | chartevents only / + OMR | chartevents non-invasive + arterial BP, weight (kg, lbs), height (cm, in); OMR excluded because its 00:00 time makes a value visible before it was measured that day | **Awaiting confirmation** | `datasets/MIMIC-IV.yaml` |
+| Medications without ATC | MIMIC-IV-MEDS: drug names; route/frequency as extra columns; NDC only at HEAD | Keep names whole / NDC→ATC mapping | Names whole (ATC 3/2/rest split applies only to ATC-shaped codes); route and frequency tokens from the ETL columns; no dose column exists | Names-whole **confirmed** 2026-11-09 (0226); attributes per paper | `medication` category, `MEDICATION_ATTRIBUTES` |
+| Inclusion thresholds (≥400k numeric-lab events, ≥22k non-numeric, ≥10k procedures/medication attributes/result values) | 0826 Sec. 2.3-2.6, Table 3 totals | Absolute counts (exclude almost everything on MIMIC) / shares | Each count divided by its Table 3 category total, applied as a share of the dataset's training events; the 500-observation minimum for lab bucketing stays absolute (a statistical requirement) | Routine (configurable) | `config.py`, `_Vocabulary.fit` |
+| Right-censoring cutoff | 0826 Sec. 2.2.2 (pad to the data cutoff with six-month tokens) | Global latest time / per subject | min(latest training time, last event + `follow_up_days` = 365): MIMIC-IV dates are shifted per patient, and MIMIC-IV records out-of-hospital deaths for one year after discharge | Routine (configurable); per-subject rule asked about by Florent 2026-11-20 | `events` (`censor`), `sequences` |
+| Vital downsampling window | 0826 Sec. 2.4 ("latest value in each rolling 6-hour window") | Windows anchored on data / on the clock | Clock-aligned 6-hour windows; a value is hidden only once the later value of its window is visible, so prompts never depend on the future | Routine | `events` (`superseded`), `sequences` |
+| Stage 2 learning rate | 0826 Sec. 3.2 (steps and epochs given, schedule not) | — | Constant at the final stage-1 rate (`learning_rate × final_lr_ratio`) | Routine | `_model._extend` |
+| Model size | 0826: ~4.3B, 40 layers, 75 tokens/parameter; MIMIC-IV is orders of magnitude smaller | — | Default stays Curiosity-S size (6 layers, 768); `capacity`/`num_layers` scale it | Routine | `config.py` |
+| Generation budget | 0826 Sec. 4.1 (60 simulations, 3,000-4,000 tokens, 2-4 retries per task) | — | n = 60, 4,000 tokens, 5 attempts (four retries, the 365-day mortality setting) for a task-independent `infer_trajectories` | Routine (configurable) | `config.py` |
+| Key with no resolved future | Contract §5 (finite probabilities) | — | Fallback 0.5, keys in `unresolved_keys.arrow` | **Confirmed** 2026-11-09: "Finite fallback + flag file" | `predict_zero_shot_materialized` |
+| Futures that cannot answer the task | 0226 Eq. 2; 0826 Sec. 4.1 (incomplete simulations discarded) | — | Probability = positives / resolved futures | **Confirmed** 2026-11-09 | `_aggregate` |
+| Time-token edges, embedding tying, KV heads, optimizer defaults, `[UNK]` | as recorded for 0226 | — | Unchanged (0826: unchanged representations) | Resolved from source / routine | `_tokenizer.py`, `_model.py` |
 
 ## Profile choices
 
 ### zero_shot_materialized
 
-- Lifecycle justification: the paper's whole method is materialized zero-shot prediction. It pretrains a
-  generative model on unlabeled timelines (Sec. 5.3), samples future timelines from a prompt ending at the
-  prediction time (Sec. 5.5), and evaluates each task on the generated futures as the fraction of futures with
-  the outcome (Eq. 2). That is `preprocess_data → pretrain → infer_trajectories → predict_zero_shot_materialized`.
-  No supervised, finetune or probe use is part of Curiosity's claim; the paper's supervised models are
-  baselines, so they were not added.
+- Lifecycle justification: the paper's whole method is materialized zero-shot prediction: pretrain a generative
+  model on unlabeled timelines, sample futures from a prompt ending at the prediction time, and evaluate each task
+  on the futures. That is `preprocess_data → pretrain → infer_trajectories → predict_zero_shot_materialized`.
 - Implemented profile methods, algorithm-owned configuration and payload formats: `Curiosity` implements all four
-  methods. `CuriosityConfig` extends core `NNConfig`. Payloads are `curiosity-tokens/v1`, `curiosity-qwen2/v1`,
-  `curiosity-trajectories/v1` and `curiosity-predictions/v1` (table below).
-- Frozen/fitted parameters and permitted label access: the vocabulary, deciles and race values are fitted on
-  `train` only. Weights are trained on `train` sequences; the `tuning` loss is used only for early stopping. No
-  command reads label values: inference and prediction read keys through `PredictionIndex.read()`
-  (`read_index`), and the runner alone attaches truth after scoring.
+  methods; `CuriosityConfig` extends core `NNConfig`. Payloads: `curiosity-events/v2`, `curiosity-qwen2/v2`,
+  `curiosity-trajectories/v2`, `curiosity-predictions/v2`.
+- Frozen/fitted parameters and permitted label access: vocabulary, lab buckets, text-result and attribute values,
+  vital codes, races, year range and the censoring cutoff are fitted on `train` only. Weights are trained on
+  `train`; `tuning` is used only for early stopping. No command reads label values.
 - Local and MEDS-DEV evidence for this profile: see Verification.
 
 ## Source-element ledger
 
 | Source element | Status: ported/adapted/omitted | Implementation evidence | Justification/deviation |
 |---|---|---|---|
-| Chronological event tokenization with an a-priori vocabulary (Sec. 5.2) | adapted | `_tokenizer._Vocabulary` | Vocabulary built from MIMIC codes of the paper's categories (decision above) |
-| Demographics: sex, race, age in 5-year buckets, then BOS (Sec. 5.2.1) | adapted | prefix in `transform` | Age at first kept event; years-since-1970 omitted (shifted MIMIC dates) |
-| Encounter start/end tokens with type, department specialty, chief complaint (Sec. 5.2.2) | adapted | `encounter` category | MIMIC admission/discharge/ICU/ED/transfer codes already carry type and location/care unit; MIMIC-IV MEDS has no chief complaint |
-| Diagnoses as ICD 3/2/2 sub-tokens (Sec. 5.2.3) | ported | `_split_icd`, `decode` | ICD-9 also split; diagnosis time is the MIMIC ETL's (discharge time) |
-| Top 1,000 numeric labs + 10 shared decile tokens (Sec. 5.2.4) | ported | `lab` category, `quantiles` | `LAB//RESULT//*` hosp labs, train deciles per code |
-| Medication orders as ATC 3/2/2 (Sec. 5.2.5) | adapted | `medication` category | Pharmacy order codes kept whole (no ATC in MIMIC) |
-| Top 1,500 billed procedures (Sec. 5.2.6) | adapted | `procedure` category | ICD procedures, HCPCS, and ICU procedure starts, pooled top 1,500 |
-| Exclusions: notes, vitals, administrations, free text (Sec. 5.2.8) | ported | `datasets/MIMIC-IV.yaml` | chartevents, eMAR, infusions, outputs, OMR, DRG are excluded |
-| Death | adapted | `death` category, stop token | Not a token type in the paper; required by MIMIC mortality tasks (confirmed category list) |
-| ETHOS time tokens; geometric-mean time decoding (Sec. 5.2.7, 5.5) | ported | `TIME_BUCKETS`, `_token_seconds` | Bucket edges from ETHOS (see decision) |
-| Qwen2 decoder, random init, pre-LN/SwiGLU/RoPE (Sec. 5.3.1) | ported | `_model.build_model` | Tied embeddings derived from Table 1 |
-| Sizes S/M/L (Table 3) | adapted | `capacity` | S is the reference; M/L need config changes (depth fixed by `num_layers`) |
-| Dense packing with separator, context 8,192, batch 512 (Sec. 5.3.1) | ported | `_model._pack`, `sequences_per_step` | Microbatches + accumulation |
-| AdamW, cosine with 10x decay (Sec. 5.3.1) | ported | `_model.pretrain` | Other hyperparameters routine |
-| Compute-optimal token budgets / scaling laws (Sec. 2.6, 3.1) | omitted | — | Scaling-law study, not part of the algorithm; MIMIC is far below the budget |
-| Left-truncated prompt at prediction time; temperature-1 Monte Carlo sampling (Sec. 5.5) | ported | `_prompt`, `_model.generate` | Prompt ends with the elapsed real gap |
-| 2,000-token generations, up to 2 retries (Sec. 5.6) | ported | `max_new_tokens`, `max_attempts` | Retry = continuation |
-| Task-specific stop at encounter end (Sec. 5.6.2, 5.6.8) | adapted | horizon / death / separator stops | `infer_trajectories` must be task-independent; ACES handles windows |
-| Eq. 2 right-censored probability | adapted | `_aggregate` | Extended to futures outside the task population; finite fallback |
-| Lab values sampled uniformly within the decile (App. G) | ported | `decode` | Train min/max bound the outer deciles |
-| Task outcome definitions (ICD code sets, emergent encounters, etc., Sec. 5.6) | adapted | ACES via `aces-relaxations.extract` | MEDS tasks are given as ACES criteria |
-| Calibration/ECE, plausibility metrics, baselines (Sec. 5.4, 5.6.1) | omitted | — | Evaluation-side analyses; MEDS-DEV owns evaluation |
+| BOS prepended to every sequence (0826 2.2.1) | ported | `sequences` | Packing concatenates BOS-led sequences (no separator) |
+| Age at start of timeline: days, weeks, 4-week, 6-month, then 1-year buckets; year-at-start in 5-year buckets (0826 2.1) | ported | `age_token`, `year_token` | Start = first visible event, or the prediction time when none; MIMIC-IV years are shifted per patient (noise, not information) |
+| Sex, race tokens (0226 5.2.1) | adapted | `static`, `race` | Race = first recorded value, shown only once recorded |
+| Birth event, gestational age (lt22w…gt44w), birth weight with lab buckets (0826 2.1) | ported | `birth`, `gestational_age`, `birth_weight` categories | MIMIC-IV records none (`null`); MEDS_BIRTH there is computed, so it only dates the age token |
+| Death at the last instant of its date, preliminary causes, closing token, EOS (0826 2.2.2) | ported | death block in `events` | Later events dropped; MIMIC-IV has no cause of death |
+| Right-censored records padded with six-month tokens (0826 2.2.2) | adapted | `censor`, `sequences` | Per-subject cutoff (decision above); padding never enters a prompt |
+| Encounters (0226 5.2.2) | adapted | `encounter` | MIMIC codes carry type and unit; no chief complaint |
+| Diagnoses ICD 3/2/2 (0226 5.2.3) | ported | `_split` | ICD-9 also split |
+| Lab collection marker at collection, result at result time (0826 2.3.1) | adapted | `lab` category | ETL rows used as-is (decision above) |
+| Numeric labs: 30 shared percentile buckets, ≥500 values per code (0826 2.3.4) | ported | `LAB_LEVELS`, `quantiles` | Token keeps MIMIC's unit (part of the code) |
+| Non-numeric labs: result tokens, Other, missing (0826 2.3.2) | ported | `RESULT//*` | Global result values |
+| Vitals: one binned token (Table 2), plausibility bounds, 6-hour downsampling (0826 2.4) | ported | `VITALS`, `VITAL_CATEGORIES` | Units converted from the source category; window anchoring routine |
+| Procedures ≥ threshold (0826 2.5) | adapted | `procedure_min_share` | Share instead of count |
+| Medications: ATC 3/2/rest, route/form, dose/strength, frequency tokens, reported flag (0826 2.6) | adapted | `medication`, `reported_medication`, `MEDICATION_ATTRIBUTES` | Attribute tokens per value (not per ATC code); MIMIC: names whole, no dose, no reported medications |
+| ETHOS time tokens; geometric-mean time decoding (0226 5.2.7, 5.5) | ported | `TIME_BUCKETS`, `_token_seconds` | Unchanged in 0826 |
+| Qwen2 decoder, random init, tied embeddings (0226 5.3.1) | ported | `build_model` | 0826 does not name its architecture |
+| Two-stage context 8,192 → 16,384, unscaled RoPE (0826 3, 3.2) | ported | `_extend`, `generation_context` | Stage-2 learning rate routine |
+| IsoFLOP scaling / 4.3B size (0826 3.1) | omitted | — | Scaling study; MIMIC-IV is far below the budget |
+| Monte Carlo futures, temperature 1, left-truncated prompts (0226 5.5) | ported | `generate` | Budget per 0826 Sec. 4.1 |
+| Incomplete simulations discarded (0826 4.1.1) | adapted | `_aggregate` | Positives / resolved futures |
+| Task outcome definitions | adapted | ACES via `aces-relaxations.extract` | MEDS tasks are given as ACES criteria |
+| Lab-value regression, length of stay, calibration analyses (0826 4.2) | omitted | — | The contract evaluates binary task probabilities |
 
 ## Zero-shot materialization
 
 - What `infer_trajectories` generates (samples per row, generation horizon, stopping rule): for every requested
-  `(subject_id, prediction_time)` it builds a prompt from the prepared tokens with time ≤ prediction_time (plus
-  the demographic prefix), then appends the real elapsed-gap time tokens. It samples `n_samples` = 20 futures
-  at temperature 1, with no top-k/top-p and a per-key RNG seeded from `(seed, subject_id, prediction_time)`, so
-  results don't depend on row order. Each future runs for up to 3 attempts × 2,000 tokens. It stops at
-  MEDS_DEATH (`death`), the separator (`end_of_record`), generated time beyond prediction_time + 365 d
-  (`horizon`), or the token budget (`token_budget`). Decoded events go to `events.parquet`. `samples.parquet`
-  holds, per sample, the stop reason, the final clock (`end_time`), the token counts and the invalid-token count.
-- How `predict_zero_shot_materialized` evaluates the task on history plus futures, and aggregates: each
-  (key, sample) becomes a pseudo-subject. Its events are the real MEDS events with time ≤ prediction_time (or
-  static), plus that sample's generated events. The **original** ACES task (criteria + dataset predicates) runs
-  on these pseudo-subjects with `aces_relaxations.extract`, and only the row at the key's prediction time is
-  kept. A future is *resolved* if it is positive, or negative with `extract_label_window_bounds`' label-window
-  end ≤ its `end_time` (or it ended in death). An absent row, meaning the future violated a post-prediction
-  criterion or never closed an event-bounded window, is unresolved. Probability = positives / resolved; a key
-  with no resolved future gets `fallback_probability` (0.5) and is listed in `unresolved_keys.arrow`.
+  `(subject_id, prediction_time)`, `_Vocabulary.sequences` builds the prompt from the prepared events recorded at or
+  before the prediction time: BOS, sex, race once recorded, age and year at the start of the visible timeline, the
+  visible events (vitals not yet superseded by then) with time tokens, then the elapsed-gap time tokens. It samples
+  `n_samples` = 60 futures at temperature 1, no top-k/top-p, with a per-key RNG seeded from
+  `(seed, subject_id, prediction_time)`. Each future runs up to 5 attempts × 4,000 tokens and stops at EOS
+  (`death`; EOS follows only a death), BOS (`end_of_record`), generated time beyond prediction_time + 365 d
+  (`horizon`), or the token budget (`token_budget`).
+- How `predict_zero_shot_materialized` evaluates the task on history plus futures, and aggregates: each (key,
+  sample) becomes a pseudo-subject made of the real MEDS events with time ≤ prediction_time plus that sample's
+  generated events; the original ACES task runs on them (`aces_relaxations.extract`). A future is resolved if
+  positive, or negative with its label window ending by its `end_time` (or in death). Probability = positives /
+  resolved; a key with no resolved future gets 0.5 and is listed in `unresolved_keys.arrow`.
 - Ledger per evaluated task (sampling approximation; horizon or unresolvable-future effects): `relaxations.yaml`
-  has `exact: false` with four steps: Monte Carlo (n, temperature), generation limit (horizon/token budget;
-  censoring), task population (excluded futures; only the label window, not criteria windows, is checked
-  against the generation end) and fallback (count of unresolved keys, fraction of resolved futures). The demo
-  task's realized ledger will be recorded after the demo run.
-- Tasks that cannot be evaluated on generated data, and why: tasks whose post-prediction (normal-form) predicates
-  match no generable code or value are rejected before any work (`_check_generable`). Examples are tasks on
-  chartevents vitals (`LAB//220645//mEq/L` sodium, `LAB//227443` bicarbonate in MEDS-DEV's predicates) or on
-  eMAR/infusion codes, which the paper's categories exclude. Predicates on `other_cols` are rejected too.
-  MEDS-DEV's `mortality/in_icu/first_24h` needs only ICU admission/discharge and MEDS_DEATH, which are generable.
+  (`exact: false`): Monte Carlo, generation limit, task population, fallback.
+- Tasks that cannot be evaluated on generated data, and why: tasks whose post-prediction predicates match no
+  generable code or value are rejected before any work (`_check_generable`), e.g. chartevents other than the vitals,
+  eMAR or infusion codes. Predicates on `other_cols` are rejected.
 
 ## Inputs and predicates
 
-- MEDS assumptions: a split-sharded MEDS dataset (`data/<split>/*.parquet`) with `subject_id`, `time`, `code`,
-  `numeric_value`; a `train` split is required, `tuning` is optional (early stopping). `MEDS_BIRTH` gives age;
-  sex comes from the category file's `curiosity_sex` codes; an optional `race` column (MIMIC-IV-MEDS puts it on
-  admission rows) gives race.
-- Dataset category files: dataset code knowledge lives only in a YAML file of ACES plain predicates, one per
-  configured category (`curiosity_sex`, `curiosity_death`, `curiosity_encounter`, `curiosity_diagnosis`,
-  `curiosity_lab`, `curiosity_medication`, `curiosity_procedure`). `CuriosityConfig.categories` holds only the
-  paper's dataset-independent semantics: order, top-k, numeric, ICD split. Preprocessing selects the file as follows:
-  1. `additional_predicates_file` when set (core composes it, records source and resolved digests, and keeps
-     `resolved_feature_predicates.yaml` in the prepared-data artifact);
-  2. otherwise the bundled `src/curiosity_meds/datasets/<dataset_name>.yaml`, where `dataset_name` comes from the
-     MEDS dataset's own `metadata/dataset.json` (MIMIC-IV-MEDS writes `MIMIC-IV`, demo and full data). This route
-     lets MEDS-DEV runs, whose `model.yaml` is dataset-independent and cannot pass a dataset name, pick the
-     right mapping;
-  3. otherwise preprocessing fails and names the bundled datasets.
-  The chosen file's path, digest and route are in `payload.json`, and the predicates themselves are frozen into
-  `vocabulary.json`. Only `MIMIC-IV.yaml` is bundled. eICU, NWICU and others need their own file, with
-  `split_icd` disabled unless their diagnosis codes are bare ICD codes.
-- Required predicate names: preprocessing needs the seven `curiosity_*` category predicates above and no task or
-  dataset predicates (the dataset predicates argument was removed from the preprocess command). Prediction needs the task's predicates, as MEDS-DEV binds them: the
-  task criteria plus `external_predicates_file` (MEDS-DEV MIMIC-IV `predicates.yaml` for the demo, which
-  supplies `icu_admission`/`icu_discharge`).
-- Predicate interpretation and derived features: predicates are interpreted only by ACES on real history +
-  generated events, never as features. Generated lab values are sampled within their decile, so value
-  thresholds are evaluated on sampled values.
+- MEDS assumptions: split-sharded MEDS (`data/<split>/*.parquet`) with `subject_id`, `time`, `code`, `numeric_value`;
+  optional `text_value` (non-numeric labs, text vitals), `race` (MIMIC-IV-MEDS admission rows), and medication
+  columns `route`, `dose`, `frequency`. `train` is required; `tuning` is optional. `MEDS_BIRTH` dates the age token.
+- Dataset category files: one ACES plain predicate per category in `config.CATEGORIES` (`curiosity_sex` …
+  `curiosity_procedure`; `null` when the dataset does not record it), selected from `additional_predicates_file`,
+  else the bundled `datasets/<dataset_name>.yaml` named by the dataset's `metadata/dataset.json`, else an error.
+  Only `MIMIC-IV.yaml` is bundled (MIMIC-IV-MEDS 0.1.0 conventions).
+- Required predicate names: preprocessing needs the `curiosity_*` predicates only; prediction needs the task's
+  criteria and the dataset predicates MEDS-DEV binds.
+- Predicate interpretation and derived features: predicates are interpreted only by ACES on real history + generated
+  events. Generated numeric values are sampled within their bucket.
 
 ## Intermediate artifacts
 
 | Command | Payload format/version | Compatibility check | Inputs/provenance |
 |---|---|---|---|
-| `preprocess_data` | `curiosity-tokens/v1`: `vocabulary.json`, `tokens/<split>/<shard>.parquet` (`subject_id`, `tokens`, `times`), `payload.json` | — | `payload.json`: vocabulary digest, fitted split (`train`), category-file route/path/digest, SHA-256 of every MEDS shard, per-split subject/token counts |
-| `pretrain` | `curiosity-qwen2/v1`: `model/` (safetensors + Qwen2 config), `payload.json` | data payload format | vocabulary digest; per-epoch train/tuning loss, optimizer steps, measured parameter count, train tokens per epoch, device |
-| `infer_trajectories` | `curiosity-trajectories/v1`: `events.parquet`, `samples.parquet`, `payload.json` | data and model payload formats; model vocabulary digest == data vocabulary digest; core config check | vocabulary digest; n, sampling policy, horizon, token budget, prompt rule, time units, stop reasons |
-| `predict_zero_shot_materialized` | `curiosity-predictions/v1`: `predictions.parquet`, `unresolved_keys.arrow`, `relaxations.yaml` | trajectories format and vocabulary digest; every requested key has exactly `n_samples` samples; task generability | core records task provenance and semantics digest |
+| `preprocess_data` | `curiosity-events/v2`: `vocabulary.json`, `events/<split>/<shard>.parquet` (`subject_id, time, rank, order, tokens, superseded`), `subjects/<split>/<shard>.parquet` (`static, race, race_time, birth, censor`), `payload.json` | — | vocabulary digest, fitted split, category-file route/path/digest, SHA-256 of every MEDS shard, per-split subject/event counts |
+| `pretrain` | `curiosity-qwen2/v2`: `model/`, `payload.json` | data payload format | vocabulary digest; per-epoch losses, optimizer steps, stage-2 summary, parameters, device |
+| `infer_trajectories` | `curiosity-trajectories/v2`: `events.parquet` (with `text_value`), `samples.parquet`, `payload.json` | data and model formats; equal vocabulary digests | n, sampling policy, horizon, budget, prompt rule, stop reasons |
+| `predict_zero_shot_materialized` | `curiosity-predictions/v2`: `predictions.parquet`, `unresolved_keys.arrow`, `relaxations.yaml` | trajectories format and vocabulary; every key has `n_samples` samples; task generability | core records task provenance |
 
 ## Scientific deviations
 
-1. Dataset and vocabulary: Epic Cosmos (118M patients; ICD-10-CM/ATC/LOINC/CPT) is replaced by MIMIC-IV with
-   MIMIC code systems (decisions above). No ATC, LOINC or CPT mapping is done; chief complaints and
-   years-since-1970 are absent. Death is a token.
-2. Scale: the paper's token budgets (90B-1.7T) are unreachable; training stops early on tuning loss.
-3. Task-independent generation: the paper stops some generations at the end of an encounter for a specific task.
-   Here a single horizon (365 d) and token budget serve every task, and ACES decides when the task resolves.
-4. Probability: Eq. 2 is extended to futures that leave the task population, and a finite fallback (0.5)
-   replaces the paper's exclusion of patients with no resolved generation.
-5. Routine defaults for every hyperparameter the paper leaves unspecified (table above).
+1. Data and vocabulary: Epic Cosmos is replaced by MIMIC-IV codes (no ATC, LOINC, CPT; no chief complaint, births,
+   gestational age, birth weight, cause of death or patient-reported medications; OMR excluded pending decision).
+2. Thresholds are shares of the dataset's events, not Cosmos counts; the right-censoring cutoff is per subject.
+3. Scale: Curiosity-S size, early stopping on tuning loss; stage 2 as specified but at a routine learning rate.
+4. Task-independent generation with one horizon and budget; ACES decides when a task resolves.
+5. Probability extends discarding of incomplete simulations to futures outside the task population, with a finite
+   fallback.
 
 ## Verification
 
+### Temporal leakage
+
+- Shared checks (core `fa8cdfa`): `test_end_to_end` reruns the lifecycle on a copy where every evaluated subject's
+  events after its latest prediction time are rewritten and requires bit-identical probabilities; the null-world test
+  is skipped for zero-shot profiles.
+- Finding on the previous (0226) implementation: race came from the first race recorded anywhere in the record and
+  age from the first kept event, even when after the prediction time. With fixture survivors whose race is recorded
+  only at a later readmission, **6 of 40 held-out prompts changed** under `perturb_future`, yet the shared
+  prediction-level check **passed**: a probability estimated from 8 futures takes few values, so changed prompts can
+  leave it unchanged. The fixture keeps these late-race subjects.
+- Algorithm-specific checks added (`tests/test_curiosity.py`): prompts are identical under `perturb_future` on the
+  fixture (`test_prompts_are_invariant_to_rewritten_futures`); random future events after random cutoffs never change
+  a prompt across every representation (`test_random_futures_never_change_random_prompts`); prompt contents at cutoffs
+  before, inside and after a vital window, with race recorded later (`test_prompt_uses_only_history_at_the_prediction_time`).
+- Review of the remaining paths: the vocabulary, buckets and cutoff are fitted on `train` only; pretraining reads
+  `train`/`tuning` only; padding and EOS never enter prompts; generation is causal (Qwen2) and seeded per key;
+  prediction joins only real events with time ≤ prediction_time. Data-level caveat outside the algorithm: MIMIC-IV-MEDS
+  times `dod` deaths and OMR rows at 00:00 of their date.
+
 ### Primary behavior
 
-- Signal and expected behavior: in the synthetic ICU fixture, a medication ordered one hour after ICU
-  admission (`MEDICATION//START//SIGNAL_DRUG` vs `CONTROL_DRUG`) decides in-ICU death vs ICU discharge 60-90 h
-  after admission. The model is pretrained without labels. Its futures must carry death after the signal drug,
-  so the ACES in-ICU-mortality task scores signal subjects higher.
-- How the signal enters the algorithm's selected codes/features: both drug codes match the `medication`
-  category and are asserted to be vocabulary codes before the behavioral assertion; MEDS_DEATH must appear
-  among generated events.
-- Example generator used or adaptation made: core `build_signal_dataset` was replaced (its `BG//*`/`SIGNAL//POS`
-  codes are outside the paper's categories, and a zero-shot task needs a temporal structure). The replacement
-  is `tests/e2e.build_fixture`: MIMIC-IV-MEDS-style codes with ACES-derived labels, plus core split canaries.
-- Test model: `TEST_CONFIG`, a 2-head, 2-layer Curiosity (capacity 2/12) on CPU. A one-head model did not learn
-  the dependency in 630 steps (P(death) 0.49 for both drugs); two heads and two layers did (0.94 vs 0.014 in
-  a direct next-token probe).
-- Positive-control result (fixture: 1000/100/40 subjects, n = 8): mean predicted probability **0.98** for
-  signal-drug held-out subjects vs **0.05** for control-drug subjects; the test requires a difference > 0.5.
-- Shuffled-label negative-control result (outcome a coin flip, independent of the drug): **0.66** vs **0.64**;
-  the test requires |difference| < 0.3.
+- Signal and expected behavior: in the synthetic ICU fixture, a medication ordered one hour after ICU admission
+  (`MEDICATION//START//SIGNAL_DRUG` vs `CONTROL_DRUG`) decides in-ICU death vs discharge 60-90 h after admission.
+  The model is pretrained without labels; its futures must carry death after the signal drug.
+- How the signal enters the algorithm's selected codes/features: both drug codes match `curiosity_medication` and are
+  asserted to be vocabulary codes before the behavioral assertion; MEDS_DEATH must appear among generated events.
+- Example generator used or adaptation made: `tests/e2e.build_fixture` (MIMIC-IV-MEDS-style codes, ACES labels,
+  core split canaries) replaces core `build_signal_dataset`, whose codes are outside the paper's categories.
+- Positive-control result (fixture 1000/100/40 subjects, `TEST_CONFIG`, n = 8): mean predicted probability **0.99**
+  for signal-drug held-out subjects vs **0.01** for control-drug subjects; the test requires a difference above 0.5.
+- Shuffled-label negative-control result (outcome a coin flip): **0.65** vs **0.57**; the test requires |difference|
+  below 0.3.
 
 | Suite/run | Exact command | Pass/skip counts | Coverage/result |
 |---|---|---|---|
-| Local | `uv run pytest -rs` | 28 passed, 2 skipped (the opt-in `meds_dev` and `real_data` tests: "explicitly select -m meds_dev or -m real_data"); 0 `algorithm_stub` skips | Conformance (full lifecycle, key coverage, label-blind rerun with identical probabilities, split canaries absent from fitted codes, task digest, ledger), primary behavior, 19 algorithm-specific tests |
-| Distribution | `bash scripts/check_distribution.sh` | build, `twine check`, installed `wheel_smoke.py` (plain and `--orchestration`) pass; `uv pip check` reports a false positive (see Known limitations) | Installed imports, CLI, bundled defaults, aces-relaxations import, Qwen2 build |
-| MEDS-DEV | `uv run pytest -m meds_dev -rs` | 1 passed, 27 deselected | `meds-dev-model mode=full dataset_type=full` with MEDS-DEV @ `19a8aa34`, model.yaml defaults on GPU, fixture 200/20/10; held-out keys covered |
+| Local (WSL Ubuntu, CPU, 2026-11-20) | `uv run pytest -rs` | 43 passed, 3 skipped (null world: zero-shot; opt-in `meds_dev` and `real_data`) | Conformance (lifecycle, label-blind rerun, future-blind rerun with bit-identical probabilities, split canaries, task binding, ledger), primary behavior, 36 algorithm-specific test cases incl. prompt-level temporal invariance |
+| MEDS-DEV | `uv run pytest -m meds_dev -rs` | not rerun for 0826 | 0226 gate passed on 2026-11-09 |
 | MIMIC-IV demo | `uv run pytest -m real_data -rs` | not run: awaiting human approval | — |
-| Full target dataset (MIMIC-IV; revision to be confirmed) | not run | — | Blocked: no evaluation task bundle was supplied |
-
-Proposed MIMIC-IV demo execution (needs approval): `uv run pytest -m real_data -rs`. MEDS-DEV builds the
-MIMIC-IV demo with MIMIC-IV-MEDS 0.1.0 and extracts `mortality/in_icu/first_24h` labels; the test runs the full
-profile with MEDS-DEV's MIMIC-IV predicates and the task's own criteria. It uses `DEMO_CONFIG` (paper defaults:
-Curiosity-S, context 8,192, n = 20, 3 × 2,000 tokens, 365-day horizon) with 8-sequence optimizer steps, on the
-GB10 GPU, and predicts the held-out split. The demo result is a scale/pipeline check, not a scientific result.
+| Full target dataset | not run | — | Blocked: no evaluation task bundle supplied |
 
 ## Review gates
 
 | Gate | Evidence reviewed | Reviewer/approval | Date or reference |
 |---|---|---|---|
-| Before MIMIC-IV demo | Source fidelity, local/MEDS-DEV results, predicates, demo plan | Requested from Florent; not yet approved | 2026-11-09 |
+| Before MIMIC-IV demo | Source fidelity, local/MEDS-DEV results, predicates, demo plan | Requested from Florent; not yet approved | 2026-11-20 |
 | Before full target dataset | Demo result, target-dataset/task/predicate compatibility, access, full-run resources | Not reached | — |
 
 ## Resource measurements
 
 | Environment/command | Wall seconds | Peak tree PSS bytes | Peak tree RSS bytes | GPU bytes |
 |---|---:|---:|---:|---:|
-| Fixture `preprocess_data` (1000/100/40 subjects, CPU) | 0.42 | 617,737,216 | 792,940,544 | null (CPU) |
-| Fixture `pretrain` (TEST_CONFIG, 1 torch thread) | 29.8 | 925,522,944 | 1,216,294,912 | null (CPU) |
-| Fixture `infer_trajectories` (40 keys × 8 samples) | 12.3 | 845,872,128 | 1,161,105,408 | null (CPU) |
-| Fixture `predict_zero_shot_materialized` | 0.82 | 867,859,456 | 1,183,617,024 | null (CPU) |
-| MEDS-DEV gate, whole `meds-dev-model` run (default config, GPU) | ≈ 56 (pytest wall) | per-manifest in the test's tmp dir | — | not recorded by core |
+| Fixture lifecycle (TEST_CONFIG, CPU) | recorded per step in each artifact manifest | per manifest | per manifest | null (CPU) |
 
 ## Environment and provenance
 
-- Algorithm commit and dirty state: recorded per artifact manifest; branch `worktree-curiosity-zero-shot`
-  (gates rerun after moving the category mapping to dataset files; see Verification).
+- Algorithm commit and dirty state: recorded per artifact manifest; branch `curiosity-0826`.
 - Dataset/task identifiers: synthetic fixture only; MIMIC-IV demo pending approval.
-- Dataset, task, and predicate revisions: MEDS-DEV pinned by core (`19a8aa34`) for MEDS-DEV and demo tests.
+- Dataset, task, and predicate revisions: MEDS-DEV pinned by core for MEDS-DEV and demo tests.
 - Task-bundle kind (clinical ACES tasks / sampled code-by-horizon tasks) and the commit of the tool that built it:
-  none supplied (evaluation deferred).
+  none supplied.
 - Shared task-bundle identifier/path: none supplied.
 - Digest of the bundle's task definitions: none supplied.
-- Cluster checkout commit and job IDs: none (no cluster run).
+- Cluster checkout commit and job IDs: none.
 - Structured-result branch/PR: none.
-- Dependency/platform/hardware summary: Python 3.12, torch 2.15.0+cu132, transformers 5.22.2, polars 1.44.2,
-  es-aces 0.7.4; aarch64 NVIDIA GB10 host (tests run on CPU with one torch thread).
+- Dependency/platform/hardware summary: Python 3.12 (WSL Ubuntu), torch, transformers 5.22, polars 1.44,
+  aces-relaxations 0.1.0, es-aces 0.7.4. Native Windows cannot run ACES extraction: aces-relaxations reopens an open
+  `NamedTemporaryFile` (WinError 32).
 
 ## Known limitations
 
 - Not a reproduction of the paper's results: different data, vocabulary and scale.
+- The shared future-blind rerun compares probabilities only; with few samples it can miss prompt-level leaks, hence
+  the prompt-level tests above.
 - Only the label window, not criteria windows, is checked against the generation end when resolving a negative.
-- Generation runs one key at a time (its n samples are batched); full-data inference cost is
-  O(keys × n × tokens). Prediction duplicates each key's real history n times, in chunks of 256 keys.
-- Generated diagnosis sub-token sequences can form ICD codes that do not exist; they are emitted as generated
-  (invalid-token counts are recorded per sample).
-- `aces-relaxations` is a private McDermottHealthAI repository with no release, so installation (CI, MEDS-DEV,
-  cluster) needs GitHub access to it. The GitHub Actions CI will fail at `uv sync` without a token.
-- On aarch64, `uv pip check` in `scripts/check_distribution.sh` flags torch's `nvidia-cusparselt-cu13` wheel
-  (platform tag `manylinux2014_sbsa`) as "built for a different platform". This is NVIDIA's nonstandard
-  tag for aarch64 servers; the package imports and runs on the GB10.
-- Fixture tests run on CPU with one torch thread for reproducibility of the label-blind rerun. GPU runs are not
-  bitwise reproducible.
+- Generation runs one key at a time (its n samples batched); prediction duplicates each key's history n times.
+- Generated ICD/ATC sub-token sequences can form codes that do not exist (invalid-token counts are recorded).
+- `meds-algorithm` is pinned to a git commit until a release contains `conformance/temporal.py`.
+- Fixture tests run on CPU with one torch thread for bitwise-reproducible reruns; GPU runs are not bitwise reproducible.

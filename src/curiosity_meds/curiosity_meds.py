@@ -1,5 +1,5 @@
-"""Curiosity (arXiv 2508.12104): a Qwen2 decoder pretrained on tokenized MEDS timelines whose Monte Carlo
-futures are scored with the original ACES task (zero_shot_materialized)."""
+"""Curiosity-0826 (arXiv 2611.15710, building on 2508.12104): a Qwen2 decoder pretrained on tokenized MEDS timelines
+whose Monte Carlo futures are scored with the original ACES task (zero_shot_materialized)."""
 
 from __future__ import annotations
 
@@ -20,10 +20,10 @@ from meds_algorithm.requests import (
 )
 
 from . import _model
-from ._tokenizer import DEATH_CODE, SEP, _token_seconds, _Vocabulary, category_predicates
+from ._tokenizer import BOS, EOS, PAD, VITALS, _token_seconds, _Vocabulary, category_predicates
 from .config import CuriosityConfig
 
-DATA_FORMAT, MODEL_FORMAT, TRAJECTORY_FORMAT = "curiosity-tokens/v1", "curiosity-qwen2/v1", "curiosity-trajectories/v1"
+DATA_FORMAT, MODEL_FORMAT, TRAJECTORY_FORMAT = "curiosity-events/v2", "curiosity-qwen2/v2", "curiosity-trajectories/v2"
 PREDICTION_KEYS = ["subject_id", "prediction_time"]
 _KEYS_PER_CHUNK = 256
 _EPOCH = datetime(1970, 1, 1)
@@ -82,6 +82,12 @@ def _check_generable(task, vocabulary: _Vocabulary) -> None:
         edges = vocabulary.quantiles.get(code)
         values = [None] if edges is None else [*edges, *((a + b) / 2 for a, b in zip(edges, edges[1:]))]
         rows.extend((code, value) for value in values)
+    for vital, (code, factor) in vocabulary.vital_codes.items():
+        edges, upper = VITALS[vital]
+        bounds = [0.0, *edges[1:], upper]
+        rows.extend((code, (a + b) / 2 / factor) for a, b in zip(bounds, bounds[1:]))
+    if vocabulary.gestational_code:
+        rows.extend((vocabulary.gestational_code, w + 0.5) for w in range(21, 45))
     generable = pl.DataFrame(rows, schema={"code": pl.String, "numeric_value": pl.Float64}, orient="row")
     plain = task.plain_predicates
     missing = []
@@ -95,15 +101,6 @@ def _check_generable(task, vocabulary: _Vocabulary) -> None:
             f"The task needs predicates {missing} after the prediction time, but the fitted vocabulary cannot "
             "generate any matching event (Curiosity keeps only the paper's event categories)"
         )
-
-
-def _prompt(history: dict, prediction_time: datetime, vocabulary: _Vocabulary) -> list[int]:
-    """The subject's tokens up to and including ``prediction_time``, then the elapsed gap to it."""
-    prompt = [t for t, time in zip(history["tokens"], history["times"]) if time is None or time <= prediction_time]
-    past = [time for time in history["times"] if time is not None and time <= prediction_time]
-    if past:
-        prompt += vocabulary.prompt_gap((prediction_time - max(past)).total_seconds())
-    return prompt
 
 
 def _aggregate(outcomes: pl.DataFrame, fallback: float) -> pl.DataFrame:
@@ -157,7 +154,10 @@ class Curiosity(ZeroShotMaterializedAlgorithm):
 
     # ---- preprocess_data -----------------------------------------------------------------------------------
     def preprocess_data(self, request: PreprocessDataRequest) -> PayloadMetadata:
-        """Fit the vocabulary and deciles on the train split only, then tokenize every split with them."""
+        """Fit the vocabulary and lab buckets on the train split only, then write every split's events with them.
+
+        Sequences are not stored: pretraining and inference build them from the events (``_Vocabulary.sequences``),
+        so a prompt is assembled from what is recorded at or before its prediction time only."""
         config, output = self.config, request.output.directory
         splits = sorted(path.name for path in (Path(request.meds_dir) / "data").iterdir() if path.is_dir())
         if "train" not in splits or not _shards(request.meds_dir, "train"):
@@ -166,33 +166,29 @@ class Curiosity(ZeroShotMaterializedAlgorithm):
         predicates = (yaml.safe_load(category_file.read_text()) or {}).get("predicates") or {}
         train = pl.scan_parquet(_shards(request.meds_dir, "train"))
         has_race = config.race_column is not None and config.race_column in train.collect_schema()
-        vocabulary = _Vocabulary.fit(
-            train.select("subject_id", "time", "code", "numeric_value"), config,
-            category_predicates(config, predicates), self._race(train) if has_race else None,
-        )
+        vocabulary = _Vocabulary.fit(train, config, category_predicates(predicates), self._race(train) if has_race else None)
         vocabulary.save(output / "vocabulary.json")
         counts = {}
         for split in splits:
             for shard in _shards(request.meds_dir, split):
                 frame = pl.read_parquet(shard)
-                tokens = vocabulary.transform(
-                    frame.select("subject_id", "time", "code", "numeric_value"),
-                    self._race(frame.lazy()).collect() if has_race else None,
-                )
-                target = output / "tokens" / split / shard.relative_to(Path(request.meds_dir) / "data" / split)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                tokens.write_parquet(target)
-                subjects, length = counts.get(split, (0, 0))
-                counts[split] = (subjects + tokens.height, length + int(tokens["tokens"].list.len().sum()))
+                events, subjects = vocabulary.events(frame, self._race(frame.lazy()).collect() if has_race else None, config)
+                relative = shard.relative_to(Path(request.meds_dir) / "data" / split)
+                for kind, table in (("events", events), ("subjects", subjects)):
+                    target = output / kind / split / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    table.write_parquet(target)
+                n_subjects, n_events = counts.get(split, (0, 0))
+                counts[split] = (n_subjects + subjects.height, n_events + events.height)
         (output / "payload.json").write_text(json.dumps({
             "vocabulary": _digest(output / "vocabulary.json"),
             "vocabulary_size": len(vocabulary.tokens),
             "fitted_on": "train",
             "category_predicates": {"source": category_source, "path": str(category_file), "digest": _digest(category_file)},
             "meds_shards": {str(p.relative_to(request.meds_dir)): _digest(p) for s in splits for p in _shards(request.meds_dir, s)},
-            "splits": {split: {"subjects": n, "tokens": t} for split, (n, t) in counts.items()},
+            "splits": {split: {"subjects": n, "events": e} for split, (n, e) in counts.items()},
         }, indent=1))
-        return PayloadMetadata("curiosity-tokens", 1)
+        return PayloadMetadata("curiosity-events", 2)
 
     def _category_file(self, request: PreprocessDataRequest) -> tuple[Path, str]:
         """The dataset category file: an explicit ``additional_predicates_file`` (composed by the runner), else
@@ -211,10 +207,11 @@ class Curiosity(ZeroShotMaterializedAlgorithm):
         return bundled, f"bundled datasets/{name}.yaml (metadata/dataset.json dataset_name)"
 
     def _race(self, frame: pl.LazyFrame) -> pl.LazyFrame:
+        """First recorded race per subject and its time (null for a static row); prompts use it only once visible."""
         column = self.config.race_column
         return (
-            frame.filter(pl.col(column).is_not_null()).sort("subject_id", "time")
-            .group_by("subject_id").agg(pl.col(column).first().cast(pl.String).alias("race"))
+            frame.filter(pl.col(column).is_not_null()).sort("subject_id", "time", nulls_last=False)
+            .group_by("subject_id").agg(pl.col(column).first().cast(pl.String).alias("race"), pl.col("time").first())
         )
 
     # ---- pretrain ------------------------------------------------------------------------------------------
@@ -225,20 +222,21 @@ class Curiosity(ZeroShotMaterializedAlgorithm):
         ids = vocabulary.ids
 
         def sequences(split: str) -> list[np.ndarray]:
-            files = sorted((data / "tokens" / split).rglob("*.parquet"))
-            if not files:
-                return []
-            return [np.asarray(row, dtype=np.int64) for row in pl.read_parquet(files, columns=["tokens"])["tokens"].to_list()]
+            out = []
+            for shard in sorted((data / "events" / split).rglob("*.parquet")):
+                subjects = pl.read_parquet(data / "subjects" / split / shard.relative_to(data / "events" / split))
+                rows = vocabulary.sequences(pl.read_parquet(shard), subjects)["tokens"].to_list()
+                out += [np.asarray(row, dtype=np.int64) for row in rows]
+            return out
 
         model, summary = _model.pretrain(
-            sequences("train"), sequences("tuning"), self.config, len(vocabulary.tokens), ids[SEP], ids["[PAD]"],
-            request.execution.seed,
+            sequences("train"), sequences("tuning"), self.config, len(vocabulary.tokens), ids[PAD], request.execution.seed,
         )
         model.save_pretrained(request.output.directory / "model")
         (request.output.directory / "payload.json").write_text(json.dumps({
             "vocabulary": _payload(data)["vocabulary"], "training": summary,
         }, indent=1))
-        return PayloadMetadata("curiosity-qwen2", 1)
+        return PayloadMetadata("curiosity-qwen2", 2)
 
     # ---- infer_trajectories --------------------------------------------------------------------------------
     def infer_trajectories(self, request: InferTrajectoriesRequest) -> PayloadMetadata:
@@ -248,18 +246,23 @@ class Curiosity(ZeroShotMaterializedAlgorithm):
         ids = vocabulary.ids
         model = _model.load_model(request.pretrained.directory / "model", config)
         token_seconds = np.array([_token_seconds(t) if t.startswith("TIME//") else 0.0 for t in vocabulary.tokens])
-        stop_ids = {ids[SEP]: "end_of_record"}
-        if f"CODE//{DEATH_CODE}" in ids:
-            stop_ids[ids[f"CODE//{DEATH_CODE}"]] = "death"
-        keys = request.index.read().sort(PREDICTION_KEYS)
-        files = sorted(p for split in request.index.splits for p in (data / "tokens" / split).rglob("*.parquet"))
-        histories = pl.read_parquet(files).filter(pl.col("subject_id").is_in(keys["subject_id"].unique().implode()))
-        histories = {row["subject_id"]: row for row in histories.iter_rows(named=True)}
+        stop_ids = {ids[EOS]: "death", ids[BOS]: "end_of_record"}  # EOS follows only a death (0826 Sec. 2.2.2)
+        keys = request.index.read().select(PREDICTION_KEYS).sort(PREDICTION_KEYS)
+        wanted = keys["subject_id"].unique().implode()
+
+        def read(kind: str) -> pl.DataFrame:
+            files = sorted(p for split in request.index.splits for p in (data / kind / split).rglob("*.parquet"))
+            if not files:
+                raise ValueError(f"No prepared {kind} for splits {list(request.index.splits)}")
+            return pl.read_parquet(files).filter(pl.col("subject_id").is_in(wanted))
+
+        subjects = read("subjects")
+        missing = set(keys["subject_id"]) - set(subjects["subject_id"])
+        if missing:
+            raise ValueError(f"Subjects {sorted(missing)[:5]} are not in the prepared splits {list(request.index.splits)}")
+        prompts = vocabulary.sequences(read("events"), subjects, keys)
         events, samples = [], []
-        for subject_id, prediction_time in keys.iter_rows():
-            if subject_id not in histories:
-                raise ValueError(f"Subject {subject_id} is not in the prepared splits {list(request.index.splits)}")
-            prompt = _prompt(histories[subject_id], prediction_time, vocabulary)
+        for subject_id, prediction_time, prompt in prompts.iter_rows():
             seed = _model.key_seed(request.execution.seed, subject_id, (prediction_time - _EPOCH) // timedelta(microseconds=1))
             draws = np.random.default_rng(seed)
             for sample, (tokens, reason) in enumerate(_model.generate(model, prompt, config, seed, token_seconds, stop_ids)):
@@ -269,7 +272,7 @@ class Curiosity(ZeroShotMaterializedAlgorithm):
         output = request.output.directory
         pl.DataFrame(events, orient="row", schema={
             "subject_id": pl.Int64, "prediction_time": pl.Datetime("us"), "sample": pl.Int32,
-            "time": pl.Datetime("us"), "code": pl.String, "numeric_value": pl.Float64,
+            "time": pl.Datetime("us"), "code": pl.String, "numeric_value": pl.Float64, "text_value": pl.String,
         }).write_parquet(output / "events.parquet")
         pl.DataFrame(samples, orient="row", schema={
             "subject_id": pl.Int64, "prediction_time": pl.Datetime("us"), "sample": pl.Int32, "stop_reason": pl.String,
@@ -282,13 +285,14 @@ class Curiosity(ZeroShotMaterializedAlgorithm):
                          "key_seed": "sha256(seed:subject_id:prediction_time_us)"},
             "horizon_days": config.horizon_days,
             "max_new_tokens": config.max_new_tokens, "max_attempts": config.max_attempts,
-            "prompt": "real events with time <= prediction_time, then the elapsed-gap time tokens",
+            "prompt": "BOS, demographics at the start of the visible timeline, events recorded at or before "
+                      "prediction_time (vitals not yet superseded by then), then the elapsed-gap time tokens",
             "time_units": "time tokens advance by the geometric mean of their bucket; generated events are placed "
                           "strictly after prediction_time",
-            "stop_reasons": {"death": "MEDS_DEATH generated (nothing later)", "end_of_record": "separator generated",
+            "stop_reasons": {"death": "EOS generated (it follows only a death)", "end_of_record": "BOS generated",
                              "horizon": "generated time passed the horizon", "token_budget": "attempts exhausted"},
         }, indent=1))
-        return PayloadMetadata("curiosity-trajectories", 1)
+        return PayloadMetadata("curiosity-trajectories", 2)
 
     # ---- predict_zero_shot_materialized --------------------------------------------------------------------
     def predict_zero_shot_materialized(self, request: PredictZeroShotMaterializedRequest) -> PayloadMetadata:
@@ -333,7 +337,7 @@ class Curiosity(ZeroShotMaterializedAlgorithm):
         unresolved.write_ipc(output / "unresolved_keys.arrow")
         resolved_fraction = float(per_key["resolved"].sum() / max(int(per_key["samples"].sum()), 1))
         self._ledger(trajectories, unresolved.height, per_key.height, resolved_fraction).write(output)
-        return PayloadMetadata("curiosity-predictions", 1)
+        return PayloadMetadata("curiosity-predictions", 2)
 
     def _ledger(self, trajectories: Path, unresolved: int, total: int, resolved_fraction: float) -> RelaxationLedger:
         generation = _payload(trajectories)

@@ -19,7 +19,7 @@ After installation, the algorithm's own `curiosity-meds` command runs the CLI:
 curiosity-meds commands --profile zero_shot_materialized
 ```
 
-Curiosity (CoMET) generative medical event model: Qwen2 decoder pretrained on tokenized MEDS timelines, zero-shot task prediction by Monte Carlo generation of future timelines.
+Curiosity-0826 generative medical event model: Qwen2 decoder pretrained on tokenized MEDS timelines, zero-shot task prediction by Monte Carlo generation of future timelines.
 
 This repository declares the **`zero_shot_materialized`** profiles under version 4 of the minimal MEDS algorithm
 contract. The contract standardizes MEDS input, command meanings and arguments, artifact envelopes,
@@ -89,7 +89,7 @@ Read [AGENTS.md](AGENTS.md), [SPEC.md](SPEC.md), and
 files. The implementation source recorded when this repository was generated is:
 
 ```text
-https://arxiv.org/abs/2508.12104v3 (paper only; no code released)
+https://arxiv.org/abs/2611.15710v1, building on https://arxiv.org/abs/2508.12104v3 (papers only; no code released)
 ```
 
 The algorithm-owned surface is `src/curiosity_meds/curiosity_meds.py` (the typed algorithm), `src/curiosity_meds/config.py`

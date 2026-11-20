@@ -4,13 +4,17 @@ requires-python = ">=3.12"
 
 [[package]]
 name = "aces-relaxations"
-version = "0.1.dev46+gadf435787"
-source = { git = "https://github.com/McDermottHealthAI/aces-relaxations.git?rev=adf435787169047c6e0de662461b4c0d9932608e#adf435787169047c6e0de662461b4c0d9932608e" }
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "bigtree" },
     { name = "es-aces" },
     { name = "omegaconf" },
     { name = "polars" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/24/3d/b43f9b4f7d7ffaac93922e1873e3b129574d4cf927f418e1f5dede996bc5/aces_relaxations-0.1.0.tar.gz", hash = "sha256:14cac21efd92c13b7d268a347f057ef01806803f1c625f217d7c877d9825d5d7", size = 140886, upload-time = "2026-11-18T19:10:53.511Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c3/95/f031243c3396c94cc511dda42ab3af0c9afe97a9aa5da01432e9ba6d1460/aces_relaxations-0.1.0-py3-none-any.whl", hash = "sha256:0d02780e5a355d8b95876e57b2a312378d69f8c4e1186bf544c4c0eb5f7acccf", size = 63098, upload-time = "2026-11-18T19:10:51.956Z" },
 ]
 
 [[package]]
@@ -135,40 +139,40 @@ wheels = [
 
 [package.optional-dependencies]
 cublas = [
-    { name = "nvidia-cublas", marker = "platform_machine == 'aarch64' or platform_machine == 'x86_64'" },
-    { name = "nvidia-cuda-nvrtc", marker = "platform_machine == 'aarch64' or platform_machine == 'x86_64'" },
+    { name = "nvidia-cublas", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
+    { name = "nvidia-cuda-nvrtc", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
 ]
 cudart = [
-    { name = "nvidia-cuda-runtime", marker = "platform_machine == 'aarch64' or platform_machine == 'x86_64'" },
+    { name = "nvidia-cuda-runtime", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
 ]
 cufft = [
-    { name = "nvidia-cufft", marker = "platform_machine == 'aarch64' or platform_machine == 'x86_64'" },
-    { name = "nvidia-nvjitlink", marker = "platform_machine == 'aarch64' or platform_machine == 'x86_64'" },
+    { name = "nvidia-cufft", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
+    { name = "nvidia-nvjitlink", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
 ]
 cufile = [
-    { name = "nvidia-cufile", marker = "platform_machine == 'aarch64' or platform_machine == 'x86_64'" },
+    { name = "nvidia-cufile", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
 ]
 cupti = [
-    { name = "nvidia-cuda-cupti", marker = "platform_machine == 'aarch64' or platform_machine == 'x86_64'" },
+    { name = "nvidia-cuda-cupti", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
 ]
 cusolver = [
-    { name = "nvidia-cublas", marker = "platform_machine == 'aarch64' or platform_machine == 'x86_64'" },
-    { name = "nvidia-cusolver", marker = "platform_machine == 'aarch64' or platform_machine == 'x86_64'" },
-    { name = "nvidia-cusparse", marker = "platform_machine == 'aarch64' or platform_machine == 'x86_64'" },
-    { name = "nvidia-nvjitlink", marker = "platform_machine == 'aarch64' or platform_machine == 'x86_64'" },
+    { name = "nvidia-cublas", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
+    { name = "nvidia-cusolver", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
+    { name = "nvidia-cusparse", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
+    { name = "nvidia-nvjitlink", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
 ]
 cusparse = [
-    { name = "nvidia-cusparse", marker = "platform_machine == 'aarch64' or platform_machine == 'x86_64'" },
-    { name = "nvidia-nvjitlink", marker = "platform_machine == 'aarch64' or platform_machine == 'x86_64'" },
+    { name = "nvidia-cusparse", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
+    { name = "nvidia-nvjitlink", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
 ]
 nvjitlink = [
-    { name = "nvidia-nvjitlink", marker = "platform_machine == 'aarch64' or platform_machine == 'x86_64'" },
+    { name = "nvidia-nvjitlink", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
 ]
 nvrtc = [
-    { name = "nvidia-cuda-nvrtc", marker = "platform_machine == 'aarch64' or platform_machine == 'x86_64'" },
+    { name = "nvidia-cuda-nvrtc", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
 ]
 nvtx = [
-    { name = "nvidia-nvtx", marker = "platform_machine == 'aarch64' or platform_machine == 'x86_64'" },
+    { name = "nvidia-nvtx", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
 ]
 
 [[package]]
@@ -194,10 +198,10 @@ test = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aces-relaxations", git = "https://github.com/McDermottHealthAI/aces-relaxations.git?rev=adf435787169047c6e0de662461b4c0d9932608e" },
-    { name = "meds-algorithm", extras = ["conformance"], marker = "extra == 'test'", specifier = "==0.4.0a5" },
-    { name = "meds-algorithm", extras = ["data"], specifier = "==0.4.0a5" },
-    { name = "meds-algorithm", extras = ["orchestration"], marker = "extra == 'orchestration'", specifier = "==0.4.0a5" },
+    { name = "aces-relaxations", specifier = "==0.1.0" },
+    { name = "meds-algorithm", extras = ["conformance"], marker = "extra == 'test'", git = "https://github.com/McDermottHealthAI/meds-algorithm.git?rev=fa8cdfad1140aebf01bd0b544aee6ff580ec98d3" },
+    { name = "meds-algorithm", extras = ["data"], git = "https://github.com/McDermottHealthAI/meds-algorithm.git?rev=fa8cdfad1140aebf01bd0b544aee6ff580ec98d3" },
+    { name = "meds-algorithm", extras = ["orchestration"], marker = "extra == 'orchestration'", git = "https://github.com/McDermottHealthAI/meds-algorithm.git?rev=fa8cdfad1140aebf01bd0b544aee6ff580ec98d3" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pyyaml", specifier = ">=6" },
     { name = "torch", specifier = ">=2.6" },
@@ -597,13 +601,9 @@ wheels = [
 [[package]]
 name = "meds-algorithm"
 version = "0.4.0a5"
-source = { registry = "https://pypi.org/simple" }
+source = { git = "https://github.com/McDermottHealthAI/meds-algorithm.git?rev=fa8cdfad1140aebf01bd0b544aee6ff580ec98d3#fa8cdfad1140aebf01bd0b544aee6ff580ec98d3" }
 dependencies = [
     { name = "pyyaml" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/69/70/4895cdb8642beef30a1417ad34917a13fc717d0e2f9278dbf0641b268bf8/meds_algorithm-0.4.0a5.tar.gz", hash = "sha256:7eaa2a58a2691d6d6907e5588cc97f4dfa5e73675cbffec4fa3aead65217a7ea", size = 150624, upload-time = "2026-11-03T13:10:21.533Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/d4/1d/e7871e650b6a5019ec3d72d0328980538ff65cdb17a5e0cc12e2201582e9/meds_algorithm-0.4.0a5-py3-none-any.whl", hash = "sha256:4cd83f2531aec02553794295a24c13dc2482d3a52b685b9cafc4aac3e9c3ebad", size = 100591, upload-time = "2026-11-03T13:10:20.079Z" },
 ]
 
 [package.optional-dependencies]

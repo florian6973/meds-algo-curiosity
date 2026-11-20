@@ -2,7 +2,7 @@
 
 ## 1. Inspect the source
 
-Source: `https://arxiv.org/abs/2508.12104v3 (paper only; no code released)`
+Source: `https://arxiv.org/abs/2611.15710v1, building on https://arxiv.org/abs/2508.12104v3 (papers only; no code released)`
 
 Read the paper, supplement, repository, configs, data preparation, checkpoints, and evaluation code.
 Build a source-element inventory before implementation; do not infer the algorithm solely from its headline

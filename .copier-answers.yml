@@ -1,15 +1,15 @@
 # This file is managed by Copier. Edit copier.yml or rerun Copier instead of editing it directly.
-_commit: v0.4.0a2-3-g6e8f557
+_commit: v0.4.0a2-4-g731e759
 _src_path: https://github.com/McDermottHealthAI/MEDS_algorithm_template
 algorithm_class: Curiosity
-algorithm_description: 'Curiosity (CoMET) generative medical event model: Qwen2 decoder
-    pretrained on tokenized MEDS timelines, zero-shot task prediction by Monte Carlo
-    generation of future timelines.'
+algorithm_description: 'Curiosity-0826 generative medical event model: Qwen2 decoder pretrained
+    on tokenized MEDS timelines, zero-shot task prediction by Monte Carlo generation of future
+    timelines.'
 algorithm_name: Curiosity
 algorithm_slug: curiosity_meds
 author_email: flo1.raymond@gmail.com
 author_name: Florent Pollet
-implementation_source: https://arxiv.org/abs/2508.12104v3 (paper only; no code released)
+implementation_source: https://arxiv.org/abs/2611.15710v1, building on https://arxiv.org/abs/2508.12104v3 (papers only; no code released)
 license_expression: ''
 package_name: curiosity-meds
 profiles:

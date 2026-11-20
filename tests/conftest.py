@@ -4,7 +4,7 @@ import pytest
 import torch
 from meds_algorithm.conformance.cases import AlgorithmCase
 
-from curiosity_meds.config import CodeCategory, CuriosityConfig
+from curiosity_meds.config import CuriosityConfig
 from curiosity_meds.curiosity_meds import STUB_PROFILES, create_repository
 
 from .e2e import TEST_CONFIG, fitted_codes, prepare_meds_dev_run, run_e2e
@@ -20,10 +20,10 @@ def algorithm_case():
         name="curiosity_meds",
         create_repository=create_repository,
         configurations=(
-            CuriosityConfig(),  # paper defaults: Curiosity-S, paper categories, n=20
+            CuriosityConfig(),  # defaults: Curiosity-S size, two-stage context, n=60
             TEST_CONFIG,
-            CuriosityConfig(capacity=2.0, categories=(CodeCategory("all", top_k=5000, numeric=True),),
-                            race_column=None, horizon_days=730.0, n_samples=64),
+            CuriosityConfig(capacity=2.0, race_column=None, horizon_days=730.0, n_samples=64, follow_up_days=0.0,
+                            extension_steps=0, extension_epochs=0.0, lab_numeric_min_share=0.0),
         ),
         stub_profiles=STUB_PROFILES,
         run_e2e=run_e2e,

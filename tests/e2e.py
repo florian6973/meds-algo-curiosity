@@ -23,15 +23,17 @@ TASK = "in_icu_mortality"
 SIGNAL_CODE, CONTROL_CODE = "MEDICATION//START//SIGNAL_DRUG", "MEDICATION//START//CONTROL_DRUG"
 STEPS = ("preprocess_data", "pretrain", "infer_trajectories", "predict_zero_shot_materialized")
 
-# A two-head, two-layer Curiosity (capacity 2/12 of Curiosity-S) on CPU, with a short context and budget.
+# A two-head, two-layer Curiosity (capacity 2/12 of Curiosity-S) on CPU, with a short context and budget, and a
+# two-step stage 2 at twice the context.
 TEST_CONFIG = CuriosityConfig(
     capacity=2 / 12, num_layers=2, learning_rate=3e-3, batch_size=8, sequences_per_step=8, context_length=128,
+    extended_context_length=256, extension_steps=2, extension_epochs=0.0,
     max_epochs=25, early_stopping_patience=5, warmup_fraction=0.05, device="cpu",
     n_samples=8, max_new_tokens=48, max_attempts=3, horizon_days=60.0,
     additional_predicates_file=DATASETS_DIR / "MIMIC-IV.yaml",  # explicit route; MEDS-DEV runs use dataset_name
 )
-# Real data (MIMIC-IV demo): the paper's defaults (Curiosity-S, n=20, 3 x 2,000 tokens, 365 d) on the GPU when
-# available; 8-sequence optimizer steps because the demo's ~100 subjects fill only a few 8,192-token windows.
+# Real data (MIMIC-IV demo): the defaults (Curiosity-S size, two-stage context, n=60, 5 x 4,000 tokens, 365 d) on the
+# GPU when available; 8-sequence optimizer steps because the demo's ~100 subjects fill only a few 8,192-token windows.
 DEMO_CONFIG = CuriosityConfig(sequences_per_step=8)
 
 
@@ -52,10 +54,14 @@ def build_fixture(root: Path, *, seed: int = 0, shuffle_outcomes: bool = False, 
             dies = (rng.random() < 0.5) if shuffle_outcomes else signal
             stay = timedelta(hours=rng.randint(60, 90))
             race = rng.choice(["WHITE", "BLACK/AFRICAN AMERICAN", "ASIAN"])
+            # Some survivors have race recorded only at a readmission after the prediction time, so a race token
+            # read from the whole record (rather than from history at the prediction time) leaks the future.
+            late_race = not dies and rng.random() < 0.3
+            admit_race = None if late_race else race
             events = [
                 (None, f"GENDER//{rng.choice('FM')}", None, None),
                 (admit - timedelta(days=365 * rng.randint(40, 85)), "MEDS_BIRTH", None, None),
-                (admit, "HOSPITAL_ADMISSION//EW EMER.//EMERGENCY ROOM", None, race),
+                (admit, "HOSPITAL_ADMISSION//EW EMER.//EMERGENCY ROOM", None, admit_race),
                 (icu, "ICU_ADMISSION//Medical Intensive Care Unit (MICU)", None, None),
                 (icu + timedelta(hours=1), SIGNAL_CODE if signal else CONTROL_CODE, None, None),
                 *((icu + timedelta(hours=h), "LAB//RESULT//50912//mg/dL", round(rng.gauss(1.2, 0.4), 2), None)
@@ -74,6 +80,10 @@ def build_fixture(root: Path, *, seed: int = 0, shuffle_outcomes: bool = False, 
             else:
                 events += [(end, "ICU_DISCHARGE//Medical Intensive Care Unit (MICU)", None, None),
                            (end + timedelta(days=1), "HOSPITAL_DISCHARGE//HOME", None, None)]
+                if late_race:
+                    readmit = end + timedelta(days=30)
+                    events += [(readmit, "HOSPITAL_ADMISSION//URGENT//TRANSFER FROM HOSPITAL", None, race),
+                               (readmit + timedelta(days=2), "HOSPITAL_DISCHARGE//HOME", None, None)]
             rows += [(subject, split, *event) for event in events]
             splits.append((subject, split))
     frame = pl.DataFrame(rows, orient="row", schema={
@@ -114,7 +124,13 @@ def run_e2e(
     shuffle_outcomes: bool = False,
 ):
     """preprocess_data -> pretrain -> infer_trajectories -> predict through the core runner, one fresh algorithm
-    instance per step. Without ``external_meds_dir`` it builds the synthetic fixture and its task."""
+    instance per step. Without ``external_meds_dir`` it builds the synthetic fixture and its task.
+
+    Temporal cutoff: conformance reruns this hook with ``external_meds_dir`` replaced by a copy in which every
+    evaluated subject's events after its latest prediction time are rewritten
+    (``meds_algorithm.conformance.temporal.perturb_future``); predictions must be bit-identical. The null-world
+    chance test is skipped for zero-shot profiles, so this adapter never receives the ``null_world`` dataset.
+    """
     tmp_path = Path(tmp_path)
     tmp_path.mkdir(parents=True, exist_ok=True)
     config = config or (TEST_CONFIG if external_meds_dir is None else DEMO_CONFIG)
@@ -179,7 +195,7 @@ def fitted_codes(artifacts: Mapping[str, Path]) -> set[str]:
 def prepare_meds_dev_run(meds_dev, tmp_path, *, profile: str):
     """Pretrain and predict a small fixture through MEDS-DEV's full mode with model.yaml's default config.
 
-    The defaults are the paper's (Curiosity-S, n = 20, 3 x 2,000 new tokens), run on the GPU when available; the
+    The defaults (Curiosity-S size, two-stage context, n = 60, 5 x 4,000 new tokens) run on the GPU when available; the
     fixture is kept small so the run checks installation and command wiring, not learning.
     """
     dataset, _ = build_fixture(Path(tmp_path) / "fixture", sizes=(200, 20, 10))
