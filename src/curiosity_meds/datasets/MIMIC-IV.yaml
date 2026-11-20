@@ -1,0 +1,22 @@
+# Curiosity's event categories (paper Sec. 5.2, Table 2) for MIMIC-IV in MEDS, as written by MIMIC-IV-MEDS 0.1.0
+# (the ETL MEDS-DEV builds the MIMIC-IV demo and full data with). One ACES plain predicate per category, named
+# curiosity_<category>; an event belongs to the first category (in CuriosityConfig.categories order) it matches.
+#
+# Excluded, as in the paper (Sec. 5.2.8): chartevents (LAB//<itemid>//<unit>, i.e. vitals and bedside charting),
+# eMAR administrations (MEDICATION//<drug>//<action>), infusions, outputs, OMR, DRG, specimen collection and
+# medication stops.
+predicates:
+  curiosity_sex:
+    code: { regex: "^GENDER//" }
+  curiosity_death:
+    code: MEDS_DEATH
+  curiosity_encounter:  # hospital/ICU/ED start and end, transfers (type and care unit are part of the code)
+    code: { regex: "^(HOSPITAL_ADMISSION//|HOSPITAL_DISCHARGE//|ICU_ADMISSION//|ICU_DISCHARGE//|TRANSFER_TO//|ED_REGISTRATION$|ED_OUT$)" }
+  curiosity_diagnosis:  # DIAGNOSIS//ICD//<9|10>//<code without dots>, split 3/2/2
+    code: { regex: "^DIAGNOSIS//ICD//(9|10)//" }
+  curiosity_lab:  # hosp labevents results; numeric values only
+    code: { regex: "^LAB//RESULT//" }
+  curiosity_medication:  # pharmacy orders (the paper tokenizes order instants)
+    code: { regex: "^MEDICATION//START//" }
+  curiosity_procedure:  # billed ICD procedures, HCPCS, and ICU procedure starts
+    code: { regex: "^(PROCEDURE//ICD//|HCPCS//|PROCEDURE//START//)" }
