@@ -21,8 +21,8 @@
 ## Scientific assumptions and decisions
 
 - Mode: **confirmation required** (default; exploratory mode was not enabled).
-- Unresolved blocking questions: none block the fixture gates. Two dataset choices for MIMIC-IV await Florent
-  (marked *awaiting confirmation* below): hosp/omr vitals and medication ATC mapping.
+- Unresolved blocking questions: none block the fixture gates. One MIMIC-IV choice is open: whether to map drug
+  names to ATC for 0826 (the 0226 decision kept names whole; NDC exists only in MIMIC-IV-MEDS after 0.1.0).
 - Provisional choices still requiring review before a faithful-reproduction claim: the vital window anchoring and
   the stage-2 learning rate (routine, below). This is a MIMIC-IV adaptation of an Epic-Cosmos model and cannot
   reproduce the paper's numbers.
@@ -32,7 +32,7 @@
 | Which version to implement | 0226 and 0826 papers | Keep both behind a switch / 0826 only | 0826 only | **Confirmed** by Florent (2026-11-20): "just use the last curiosity version, don't try to make it generic"; pediatric/birth representations must stay supported for other datasets | whole package |
 | Which MIMIC-IV codes form each category | 0826 Sec. 2, Table 2; MIMIC-IV-MEDS 0.1.0 and HEAD `event_configs.yaml`; ETL survey (below) | — | Dataset knowledge lives in `datasets/MIMIC-IV.yaml` (ACES plain predicates; `null` = not recorded) | Category-file approach **confirmed** 2026-11-09 for 0226; MIMIC entries below | `datasets/MIMIC-IV.yaml`, `category_predicates` |
 | Lab collection marker (0826 Sec. 2.3.1) | MIMIC-IV-MEDS ≥ 0.1.0 (`LAB//SPECIMEN_COLLECTED` at charttime, `LAB//RESULT` at storetime), eICU-MEDS (SPECIMEN_DRAWN/RESULT); NWICU, INSPIRE, AUMCdb, SICdb, HiRID, OMOP: one row, no result time | Synthesize a marker at result − 1 s (paper fallback) / use the ETL's own rows | Use the ETL's value-less lab rows as markers; never synthesize. On single-row ETLs a synthesized marker would duplicate every lab at the same time with no information | Resolved from the ETL survey; reported to Florent 2026-11-20 | `lab` category, `events` |
-| Vitals source in MIMIC-IV | MIMIC-IV-MEDS: chartevents (exact times), hosp/omr (00:00 of chartdate; 0.1.0 stores `S/D` text) | chartevents only / + OMR | chartevents non-invasive + arterial BP, weight (kg, lbs), height (cm, in); OMR excluded because its 00:00 time makes a value visible before it was measured that day | **Awaiting confirmation** | `datasets/MIMIC-IV.yaml` |
+| Vitals source in MIMIC-IV | MIMIC-IV-MEDS: chartevents (exact times), hosp/omr (00:00 of chartdate; 0.1.0 stores `S/D` text) | chartevents only / + OMR | chartevents non-invasive + arterial BP, weight (kg, lbs), height (cm, in); OMR excluded because its 00:00 time makes a value visible before it was measured that day | **Confirmed** by Florent (2026-11-20): "ok good to keep vitals like this, documented" | `datasets/MIMIC-IV.yaml` |
 | Medications without ATC | MIMIC-IV-MEDS: drug names; route/frequency as extra columns; NDC only at HEAD | Keep names whole / NDC→ATC mapping | Names whole (ATC 3/2/rest split applies only to ATC-shaped codes); route and frequency tokens from the ETL columns; no dose column exists | Names-whole **confirmed** 2026-11-09 (0226); attributes per paper | `medication` category, `MEDICATION_ATTRIBUTES` |
 | Inclusion thresholds (≥400k numeric-lab events, ≥22k non-numeric, ≥10k procedures/medication attributes/result values) | 0826 Sec. 2.3-2.6, Table 3 totals | Absolute counts (exclude almost everything on MIMIC) / shares | Each count divided by its Table 3 category total, applied as a share of the dataset's training events; the 500-observation minimum for lab bucketing stays absolute (a statistical requirement) | Routine (configurable) | `config.py`, `_Vocabulary.fit` |
 | Right-censoring cutoff | 0826 Sec. 2.2.2 (pad to the data cutoff with six-month tokens) | Global latest time / per subject | min(latest training time, last event + `follow_up_days` = 365): MIMIC-IV dates are shifted per patient, and MIMIC-IV records out-of-hospital deaths for one year after discharge | Routine (configurable); per-subject rule asked about by Florent 2026-11-20 | `events` (`censor`), `sequences` |
@@ -148,7 +148,11 @@
   events after its latest prediction time are rewritten and requires bit-identical probabilities; the null-world test
   is skipped for zero-shot profiles.
 - Finding on the previous (0226) implementation: race came from the first race recorded anywhere in the record and
-  age from the first kept event, even when after the prediction time. With fixture survivors whose race is recorded
+  age from the first kept event, even when after the prediction time. These were **errors of the MEDS adaptation,
+  not of the paper**: 0226 treats sex, race and age as a static demographic header, which is safe when demographics
+  are patient-level attributes (Epic) and prompts start from an existing timeline, but MIMIC-IV-MEDS records race on
+  admission rows (timed), and a MEDS prediction time can precede every kept event. The port read both from the
+  whole record instead of from history at the prediction time. With fixture survivors whose race is recorded
   only at a later readmission, **6 of 40 held-out prompts changed** under `perturb_future`, yet the shared
   prediction-level check **passed**: a probability estimated from 8 futures takes few values, so changed prompts can
   leave it unchanged. The fixture keeps these late-race subjects.
@@ -156,6 +160,10 @@
   fixture (`test_prompts_are_invariant_to_rewritten_futures`); random future events after random cutoffs never change
   a prompt across every representation (`test_random_futures_never_change_random_prompts`); prompt contents at cutoffs
   before, inside and after a vital window, with race recorded later (`test_prompt_uses_only_history_at_the_prediction_time`).
+- Paper rules that would leak if applied to the full record and then truncated (the papers do not say how prompts
+  are cut): 0826 vital downsampling (a value is dropped when a later value of its window exists), right-censoring
+  padding (its length depends on when the record ends) and EOS. Here they are evaluated at the cutoff instead
+  (`superseded`, padding and EOS only in training sequences), which the tests above cover.
 - Review of the remaining paths: the vocabulary, buckets and cutoff are fitted on `train` only; pretraining reads
   `train`/`tuning` only; padding and EOS never enter prompts; generation is causal (Qwen2) and seeded per key;
   prediction joins only real events with time ≤ prediction_time. Data-level caveat outside the algorithm: MIMIC-IV-MEDS
