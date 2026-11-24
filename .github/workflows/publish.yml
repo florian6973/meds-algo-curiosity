@@ -27,7 +27,7 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@v6
         with:
-          python-version: "3.11"
+          python-version: "3.12"  # project.requires-python is >=3.12 (aces-relaxations)
       - name: Require a version tag on reviewed main history
         run: |
           test "$GITHUB_REF_TYPE" = tag
