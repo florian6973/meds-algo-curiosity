@@ -566,10 +566,14 @@ wheels = [
 
 [[package]]
 name = "meds-algorithm"
-version = "0.4.0a5"
-source = { git = "https://github.com/McDermottHealthAI/meds-algorithm.git?rev=fa8cdfad1140aebf01bd0b544aee6ff580ec98d3#fa8cdfad1140aebf01bd0b544aee6ff580ec98d3" }
+version = "0.4.0a6"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pyyaml" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/30/40/1891abff0bc6c15a5790742d817e4cdc06e9e9c30452e24a8fdb5fd65b3c/meds_algorithm-0.4.0a6.tar.gz", hash = "sha256:f401aea504a725c8d5ffbf3307ce63dfe8b93be5812faaa7636814d5c0493790", size = 199122, upload-time = "2026-11-24T14:27:35.135Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fe/60/f4b4bf074e693088c855eb350021572c8df7085a0d32821ee0a46389a179/meds_algorithm-0.4.0a6-py3-none-any.whl", hash = "sha256:541dd1437617e2ae2af67efff29483470241a986ef2438625f2338d6a5d89b61", size = 109827, upload-time = "2026-11-24T14:27:33.955Z" },
 ]
 
 [package.optional-dependencies]
@@ -611,9 +615,9 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "aces-relaxations", specifier = "==0.1.0" },
-    { name = "meds-algorithm", extras = ["conformance"], marker = "extra == 'test'", git = "https://github.com/McDermottHealthAI/meds-algorithm.git?rev=fa8cdfad1140aebf01bd0b544aee6ff580ec98d3" },
-    { name = "meds-algorithm", extras = ["data"], git = "https://github.com/McDermottHealthAI/meds-algorithm.git?rev=fa8cdfad1140aebf01bd0b544aee6ff580ec98d3" },
-    { name = "meds-algorithm", extras = ["orchestration"], marker = "extra == 'orchestration'", git = "https://github.com/McDermottHealthAI/meds-algorithm.git?rev=fa8cdfad1140aebf01bd0b544aee6ff580ec98d3" },
+    { name = "meds-algorithm", extras = ["conformance"], marker = "extra == 'test'", specifier = "==0.4.0a6" },
+    { name = "meds-algorithm", extras = ["data"], specifier = "==0.4.0a6" },
+    { name = "meds-algorithm", extras = ["orchestration"], marker = "extra == 'orchestration'", specifier = "==0.4.0a6" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pyyaml", specifier = ">=6" },
     { name = "torch", specifier = ">=2.6" },

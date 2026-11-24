@@ -14,8 +14,7 @@
   `ethos/tokenize/special_tokens.py`, commit a1f03ec), which the 0226 paper says it adapted.
 - Reused packages: `aces-relaxations==0.1.0` (PyPI; ACES extraction of the task on history + futures), `es-aces`
   0.7.4, HF `transformers` (`Qwen2ForCausalLM`, the 0226 architecture), `torch`.
-- Template: MEDS_algorithm_template @ `731e759` (temporal-leakage conformance, #52); core `meds-algorithm` @
-  `fa8cdfad1140aebf01bd0b544aee6ff580ec98d3` (main with #21, `conformance/temporal.py`; PyPI 0.4.0a5 predates it),
+- Template: MEDS_algorithm_template @ `731e759` (temporal-leakage conformance, #52); core `meds-algorithm==0.4.0a6` (the first release with `conformance/temporal.py`),
   contract v4.
 
 ## Scientific assumptions and decisions
@@ -145,8 +144,8 @@
 
 ### Temporal leakage
 
-- Shared checks (core `fa8cdfa`): `test_end_to_end` reruns the lifecycle on a copy where every evaluated subject's
-  events after its latest prediction time are rewritten and requires bit-identical probabilities; the null-world test
+- Shared checks (core 0.4.0a6): `test_end_to_end` reruns the lifecycle on a copy where every evaluated subject's
+  events after its latest prediction time are rewritten and requires probabilities identical up to rounding (relative 1e-12); the null-world test
   is skipped for zero-shot profiles.
 - Finding on the previous (0226) implementation: race came from the first race recorded anywhere in the record and
   age from the first kept event, even when after the prediction time. These were **errors of the MEDS adaptation,
@@ -186,7 +185,8 @@
 
 | Suite/run | Exact command | Pass/skip counts | Coverage/result |
 |---|---|---|---|
-| Local (WSL Ubuntu, CPU, 2026-11-20) | `uv run pytest -rs` | 43 passed, 3 skipped (null world: zero-shot; opt-in `meds_dev` and `real_data`) | Conformance (lifecycle, label-blind rerun, future-blind rerun with bit-identical probabilities, split canaries, task binding, ledger), primary behavior, 36 algorithm-specific test cases incl. prompt-level temporal invariance |
+| Local (WSL Ubuntu, CPU, 2026-11-24, core 0.4.0a6) | `uv run pytest -rs` | 51 passed, 3 skipped (null world: zero-shot; opt-in `meds_dev` and `real_data`) | Conformance (lifecycle, label-blind rerun, future-blind rerun with probabilities identical up to rounding, split canaries, task binding, ledger), primary behavior, 44 algorithm-specific test cases incl. prompt-level temporal invariance, size presets and both MIMIC-IV-MEDS layouts |
+| Release | `python scripts/check_release.py`; `bash scripts/check_distribution.sh` | both pass | metadata, license, no direct-URL dependencies, installed wheel (plain and orchestration) |
 | MEDS-DEV | `uv run pytest -m meds_dev -rs` | not rerun for 0826 | 0226 gate passed on 2026-11-09 |
 | MIMIC-IV demo | `uv run pytest -m real_data -rs` | not run: awaiting human approval | — |
 | Full target dataset | not run | — | Blocked: no evaluation task bundle supplied |
@@ -227,5 +227,4 @@
 - Only the label window, not criteria windows, is checked against the generation end when resolving a negative.
 - Generation runs one key at a time (its n samples batched); prediction duplicates each key's history n times.
 - Generated ICD/ATC sub-token sequences can form codes that do not exist (invalid-token counts are recorded).
-- `meds-algorithm` is pinned to a git commit until a release contains `conformance/temporal.py`.
 - Fixture tests run on CPU with one torch thread for bitwise-reproducible reruns; GPU runs are not bitwise reproducible.
