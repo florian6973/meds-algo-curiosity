@@ -185,6 +185,7 @@
 | Release | `python scripts/check_release.py`; `bash scripts/check_distribution.sh` | both pass | metadata, license, no direct-URL dependencies, installed wheel (plain and orchestration) |
 | MEDS-DEV | `uv run pytest -m meds_dev -rs` | not rerun for 0826 | 0226 gate passed on 2026-11-09 |
 | MEDS-DEV integration (draft `curiosity/small`, MIMIC-IV demo, hypotension task; 0.1.1 wheel with the earlier `other` category) | MEDS-DEV `pytest -m integration --test_model=curiosity/small` | 7 passed, 1 error | Dataset build, task, preprocessing, pretraining, trajectories and predictions ran; evaluation failed because predictions lacked `predicted_boolean_value` (also true of 0.1.0): fixed, written as probability ≥ 0.5 |
+| MEDS-DEV integration (draft `curiosity/small`, dataset-agnostic 0.1.1 wheel, demo config) | MEDS-DEV `pytest -m integration --test_model=curiosity/small --test_task=abnormal_lab/vital/hypotension/first_24h --test_dataset=<MIMIC-IV|eICU>` | MIMIC-IV: 9 passed (8 min); eICU: 9 passed (24 min) | Dataset build, task, all four steps and meds-evaluation, on CPU; eICU runs with no dataset-specific configuration, and the hypotension task (mean arterial pressure) is generated and evaluated |
 | MIMIC-IV demo | `uv run pytest -m real_data -rs` | not run: awaiting human approval | — |
 | Full target dataset | not run | — | Blocked: no evaluation task bundle supplied |
 
