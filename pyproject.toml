@@ -3,18 +3,21 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "curiosity-meds"
+name = "meds-algorithm-curiosity"
 version = "0.1.0"
-description = "Curiosity (CoMET) generative medical event model: Qwen2 decoder pretrained on tokenized MEDS timelines, zero-shot task prediction by Monte Carlo generation of future timelines."
+description = "Curiosity-0826 generative medical event model: Qwen2 decoder pretrained on tokenized MEDS timelines, zero-shot task prediction by Monte Carlo generation of future timelines."
 readme = "README.md"
 authors = [{name = "Florent Pollet", email = "flo1.raymond@gmail.com"}]
+license = "MIT"
+license-files = ["LICENSE*"]
 
 requires-python = ">=3.12"
 dependencies = [
   "pyyaml>=6",
-  "meds-algorithm[data]==0.4.0a5",
-  # Reviewed revision (no tag or PyPI release yet): ACES evaluation of the task on real history + futures.
-  "aces-relaxations @ git+https://github.com/McDermottHealthAI/aces-relaxations.git@adf435787169047c6e0de662461b4c0d9932608e",
+  # 0.4.0a6 is the first release with the temporal-leakage conformance (conformance/temporal.py).
+  "meds-algorithm[data]==0.4.0a6",
+  # ACES evaluation of the task on real history + futures.
+  "aces-relaxations==0.1.0",
   "numpy>=1.26",
   "torch>=2.6",
   # Qwen2ForCausalLM, the paper's architecture (Sec. 5.3.1).
@@ -22,9 +25,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-orchestration = ["meds-algorithm[orchestration]==0.4.0a5"]
+orchestration = ["meds-algorithm[orchestration]==0.4.0a6"]
 # meds-evaluation is pinned to the version MEDS-DEV evaluates predictions with.
-test = ["meds-algorithm[conformance]==0.4.0a5"]
+test = ["meds-algorithm[conformance]==0.4.0a6"]
 
 [project.urls]
 Repository = "https://github.com/florian6973/meds-algo-curiosity"

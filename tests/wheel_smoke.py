@@ -28,11 +28,12 @@ def main():
 
     import yaml
     from curiosity_meds._tokenizer import category_predicates
+    from curiosity_meds.config import CATEGORIES
     from curiosity_meds.curiosity_meds import DATASETS_DIR
 
     config = CuriosityConfig()
     mimic = yaml.safe_load((DATASETS_DIR / "MIMIC-IV.yaml").read_text())["predicates"]
-    assert [name for name, _ in category_predicates(config, mimic)] == [c.name for c in config.categories]
+    assert [name for name, _ in category_predicates(mimic)] == [c for c in CATEGORIES if f"curiosity_{c}" in mimic]
     with tempfile.TemporaryDirectory() as directory:
         assert CuriosityConfig.load(config.save(Path(directory) / "config.json")) == config
     assert build_model(CuriosityConfig(capacity=1 / 12, num_layers=1), 32, 0).config.hidden_size == 64
