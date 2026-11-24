@@ -23,7 +23,7 @@ def algorithm_case():
             CuriosityConfig(),  # defaults: Curiosity-S size, two-stage context, n=60
             TEST_CONFIG,
             CuriosityConfig(capacity=2.0, race_column=None, horizon_days=730.0, n_samples=64, follow_up_days=0.0,
-                            extension_steps=0, extension_epochs=0.0, lab_numeric_min_share=0.0),
+                            extension_steps=0, extension_epochs=0.0, min_code_count=1, downsample_hours=None),
         ),
         stub_profiles=STUB_PROFILES,
         run_e2e=run_e2e,

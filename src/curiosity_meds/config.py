@@ -6,38 +6,6 @@ from dataclasses import dataclass
 
 from meds_algorithm import NNConfig
 
-# The paper's event categories, in matching order. Which MEDS codes belong to each is dataset knowledge: the ACES
-# plain predicate ``curiosity_<category>`` in a dataset category file (``datasets/<dataset_name>.yaml`` or
-# ``additional_predicates_file``); a category the dataset does not record is omitted. An event takes the first
-# matching category. Vital categories carry their source unit; values are converted to the paper's units
-# (Table 2: mmHg, inches, pounds, kg/m2).
-CATEGORIES = (
-    "sex",
-    "race",  # demographic header: the first race recorded by the cutoff (RACE//<value> codes)
-    "birth",
-    "gestational_age",  # numeric, completed weeks
-    "birth_weight",  # numeric
-    "death",
-    "cause_of_death",
-    "encounter",
-    "diagnosis",
-    "lab",
-    "vital_sbp_mmhg",
-    "vital_dbp_mmhg",
-    "vital_height_in",
-    "vital_height_cm",
-    "vital_weight_lb",
-    "vital_weight_kg",
-    "vital_bmi",
-    "medication",
-    "reported_medication",
-    "procedure",
-)
-
-# Paper inclusion thresholds as absolute counts over Epic Cosmos (Sec. 2.3-2.6), divided by the matching category
-# total of Table 3, so that a dataset of any size keeps the same share of its events.
-_LABS_NUMERIC, _LABS_TEXT, _MEDICATIONS, _PROCEDURES = 31.5e9, 5.96e9, 9.43e9, 16.5e9
-
 # Model sizes: (layers, attention heads of 64 dimensions; MLP = 4 x width). small, medium and large are
 # Curiosity-0226 S/M/L (2508.12104v3 Table 3: 62M, 119M, 1B parameters at its 7,105-token vocabulary). xlarge is
 # Curiosity-0826-4B: 40 layers and ~4.3B parameters (2611.15710 Sec. 3.1); its width is not reported, and 2,560
@@ -61,20 +29,16 @@ class CuriosityConfig(NNConfig):
     batch_size: int = 8
     weight_decay: float = 0.1
 
-    # Tokenization thresholds (paper Sec. 2.3-2.6), as shares of the category's training events.
-    lab_numeric_min_share: float = 400_000 / _LABS_NUMERIC  # numeric labs with >= 400,000 events
-    lab_text_min_share: float = 22_000 / _LABS_TEXT  # non-numeric labs with >= 22,000 events
-    lab_text_value_min_share: float = 10_000 / _LABS_TEXT  # rarer result values -> the Other token
-    lab_min_bucket_observations: int = 500  # absolute: lab-unit pairs with fewer values are excluded
-    procedure_min_share: float = 10_000 / _PROCEDURES
-    medication_attribute_min_share: float = 10_000 / _MEDICATIONS  # rarer route/dose/frequency -> null
-    # Other (an adaptation, not in the papers): codes no paper category matches, e.g. ICU charting, are kept as whole
-    # code tokens with a value bucket, so tasks on them can be answered and a dataset needs no category file. False
-    # gives the papers' vocabulary (other codes dropped). Same share threshold as procedures; the latest value per
-    # code in each other_window_hours window is kept, as the paper does for vitals (None keeps every value).
-    other_category: bool = True
-    other_min_share: float = 10_000 / _PROCEDURES
-    other_window_hours: float | None = 6.0
+    # Tokenization (dataset-agnostic adaptation, IMPLEMENTATION_REPORT.md). A code, a text result value or an
+    # attribute value seen fewer than max(min_code_count, min_code_share x training events) times is rare: a rare code
+    # becomes [UNK] (as in the paper), a rare result RESULT//[OTHER], a rare attribute value no token. A code gets the
+    # 30 value buckets when it has at least min_bucket_observations numeric values (0826 Sec. 2.3.3: 500). The latest
+    # value of each numeric code in each downsample_hours window is kept (0826 Sec. 2.4 does this for vitals; None
+    # keeps every value).
+    min_code_count: int = 10
+    min_code_share: float = 1e-6
+    min_bucket_observations: int = 500
+    downsample_hours: float | None = 6.0
     race_column: str | None = "race"
     # Right-censoring (paper Sec. 2.2.2): a record without death is padded with six-month time tokens up to the
     # data cutoff. Cutoff per subject = min(latest training time, last event + follow_up_days); MIMIC-IV records
@@ -140,16 +104,13 @@ class CuriosityConfig(NNConfig):
                 raise ValueError(f"{name} must be positive")
         positive = (
             "head_dim", "mlp_ratio", "sequences_per_step", "max_epochs", "n_samples",
-            "max_new_tokens", "max_attempts", "lab_min_bucket_observations",
+            "max_new_tokens", "max_attempts", "min_bucket_observations", "min_code_count",
         )
         for name in positive:
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} must be positive")
-        shares = ("lab_numeric_min_share", "lab_text_min_share", "lab_text_value_min_share", "procedure_min_share",
-                  "medication_attribute_min_share", "other_min_share")
-        for name in shares:
-            if not 0 <= getattr(self, name) < 1:
-                raise ValueError(f"{name} must be in [0, 1)")
+        if not 0 <= self.min_code_share < 1:
+            raise ValueError("min_code_share must be in [0, 1)")
         if self.sequences_per_step % self.batch_size:
             raise ValueError("sequences_per_step must be a multiple of batch_size")
         if self.extended_context_length < self.context_length:
@@ -158,8 +119,8 @@ class CuriosityConfig(NNConfig):
             raise ValueError("extension_steps and extension_epochs must be nonnegative")
         if self.generation_context <= self.max_new_tokens:
             raise ValueError("the generation context must exceed max_new_tokens to leave room for the prompt")
-        if self.other_window_hours is not None and self.other_window_hours <= 0:
-            raise ValueError("other_window_hours must be positive or None")
+        if self.downsample_hours is not None and self.downsample_hours <= 0:
+            raise ValueError("downsample_hours must be positive or None")
         if self.early_stopping_patience < 0:
             raise ValueError("early_stopping_patience must be nonnegative")
         if not 0 <= self.warmup_fraction < 1 or not 0 < self.final_lr_ratio <= 1:

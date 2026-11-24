@@ -1,12 +1,15 @@
 # Changes
 
-## 0.1.1 (2026-11-24)
+## 0.1.1 (unreleased)
 
-- An `other` category (on by default; `other_category=False` restores the papers' vocabulary): every code no paper
-  category matches, e.g. ICU charting, is kept as a whole-code token with a shared value bucket, latest value per
-  code in each 6-hour window. Tasks on such codes (mean arterial pressure for hypotension) can be answered.
-- A dataset needs no category file: without one, every code is `other` and death is the MEDS standard `MEDS_DEATH`.
-  A category file only adds the papers' handling (ICD/ATC splits, lab and vital tokens, demographics).
+- Dataset-agnostic tokenization (a documented adaptation of the papers): every MEDS code is one whole-code token, with
+  no event categories, category files or ICD/ATC hierarchy split. A code with at least `min_bucket_observations`
+  numeric values gets the 30 shared value-bucket tokens; codes with text values get result tokens; the optional
+  `route`, `dose`, `frequency` columns give attribute tokens on any row. One frequency threshold
+  (`min_code_count`, `min_code_share`) for every code: rarer codes become `[UNK]`. The latest value of each numeric
+  code in each 6-hour window is kept (`downsample_hours`). `MEDS_BIRTH` and `MEDS_DEATH` remain special.
+- Any MEDS dataset runs without per-dataset configuration, and any task whose codes occur in training can be
+  answered (e.g. MEDS-DEV's hypotension task on mean arterial pressure).
 
 ## 0.1.0 (2026-11-24)
 

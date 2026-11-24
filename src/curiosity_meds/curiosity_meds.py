@@ -9,7 +9,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
-import yaml
 import polars as pl
 from meds_algorithm import AlgorithmRepository, PayloadMetadata, RelaxationLedger, ZeroShotMaterializedAlgorithm
 from meds_algorithm.requests import (
@@ -20,14 +19,13 @@ from meds_algorithm.requests import (
 )
 
 from . import _model
-from ._tokenizer import BOS, EOS, PAD, VITALS, _token_seconds, _Vocabulary, category_predicates
+from ._tokenizer import BOS, EOS, PAD, _token_seconds, _Vocabulary
 from .config import CuriosityConfig
 
 DATA_FORMAT, MODEL_FORMAT, TRAJECTORY_FORMAT = "curiosity-events/v2", "curiosity-qwen2/v2", "curiosity-trajectories/v2"
 PREDICTION_KEYS = ["subject_id", "prediction_time"]
 _KEYS_PER_CHUNK = 256
 _EPOCH = datetime(1970, 1, 1)
-DATASETS_DIR = Path(__file__).parent / "datasets"  # one category file per MEDS dataset_name
 
 
 def _digest(path: Path) -> str:
@@ -76,18 +74,12 @@ def _future_predicates(task) -> set[str]:
 
 
 def _check_generable(task, vocabulary: _Vocabulary) -> None:
-    """Reject a task whose future-side predicates no generated event can satisfy (paper categories only)."""
+    """Reject a task whose future-side predicates no generated event can satisfy (codes absent or rare in training)."""
     rows = []
     for code in sorted(vocabulary.codes()):
         edges = vocabulary.quantiles.get(code)
         values = [None] if edges is None else [*edges, *((a + b) / 2 for a, b in zip(edges, edges[1:]))]
         rows.extend((code, value) for value in values)
-    for vital, (code, factor) in vocabulary.vital_codes.items():
-        edges, upper = VITALS[vital]
-        bounds = [0.0, *edges[1:], upper]
-        rows.extend((code, (a + b) / 2 / factor) for a, b in zip(bounds, bounds[1:]))
-    if vocabulary.gestational_code:
-        rows.extend((vocabulary.gestational_code, w + 0.5) for w in range(21, 45))
     generable = pl.DataFrame(rows, schema={"code": pl.String, "numeric_value": pl.Float64}, orient="row")
     plain = task.plain_predicates
     missing = []
@@ -99,7 +91,7 @@ def _check_generable(task, vocabulary: _Vocabulary) -> None:
     if missing:
         raise ValueError(
             f"The task needs predicates {missing} after the prediction time, but the fitted vocabulary cannot "
-            "generate any matching event (the codes are not in the training vocabulary, or other_category is off)"
+            "generate any matching event (its codes are absent or rare in the training split)"
         )
 
 
@@ -154,7 +146,7 @@ class Curiosity(ZeroShotMaterializedAlgorithm):
 
     # ---- preprocess_data -----------------------------------------------------------------------------------
     def preprocess_data(self, request: PreprocessDataRequest) -> PayloadMetadata:
-        """Fit the vocabulary and lab buckets on the train split only, then write every split's events with them.
+        """Fit the vocabulary and value buckets on the train split only, then write every split's events with them.
 
         Sequences are not stored: pretraining and inference build them from the events (``_Vocabulary.sequences``),
         so a prompt is assembled from what is recorded at or before its prediction time only."""
@@ -162,12 +154,9 @@ class Curiosity(ZeroShotMaterializedAlgorithm):
         splits = sorted(path.name for path in (Path(request.meds_dir) / "data").iterdir() if path.is_dir())
         if "train" not in splits or not _shards(request.meds_dir, "train"):
             raise FileNotFoundError(f"{request.meds_dir} has no train split")
-        category_file, category_source = self._category_file(request)
-        predicates = {} if category_file is None else (yaml.safe_load(category_file.read_text()) or {}).get("predicates") or {}
         train = pl.scan_parquet(_shards(request.meds_dir, "train"))
         has_race = config.race_column is not None and config.race_column in train.collect_schema()
-        categories = category_predicates(predicates, other=config.other_category)
-        vocabulary = _Vocabulary.fit(train, config, categories, self._race(train) if has_race else None)
+        vocabulary = _Vocabulary.fit(train, config, self._race(train) if has_race else None)
         vocabulary.save(output / "vocabulary.json")
         counts = {}
         for split in splits:
@@ -185,31 +174,10 @@ class Curiosity(ZeroShotMaterializedAlgorithm):
             "vocabulary": _digest(output / "vocabulary.json"),
             "vocabulary_size": len(vocabulary.tokens),
             "fitted_on": "train",
-            "category_predicates": {"source": category_source, "path": None if category_file is None else str(category_file),
-                                    "digest": None if category_file is None else _digest(category_file)},
             "meds_shards": {str(p.relative_to(request.meds_dir)): _digest(p) for s in splits for p in _shards(request.meds_dir, s)},
             "splits": {split: {"subjects": n, "events": e} for split, (n, e) in counts.items()},
         }, indent=1))
         return PayloadMetadata("curiosity-events", 2)
-
-    def _category_file(self, request: PreprocessDataRequest) -> tuple[Path | None, str]:
-        """The dataset category file: an explicit ``additional_predicates_file`` (composed by the runner), else
-        the bundled ``datasets/<dataset_name>.yaml`` named by the MEDS dataset's own ``metadata/dataset.json``, else
-        none: with the ``other`` category every code is kept (death as MEDS_DEATH), so any MEDS dataset runs."""
-        if self.config.additional_predicates_file is not None:
-            return Path(request.predicates_file), "additional_predicates_file"
-        metadata = Path(request.meds_dir) / "metadata" / "dataset.json"
-        name = json.loads(metadata.read_text()).get("dataset_name") if metadata.is_file() else None
-        bundled = DATASETS_DIR / f"{name}.yaml"
-        if (not name or not bundled.is_file()) and self.config.other_category:
-            return None, f"none for dataset_name {name!r}: paper categories unmapped, every code in 'other'"
-        if not name or not bundled.is_file():
-            available = sorted(path.stem for path in DATASETS_DIR.glob("*.yaml"))
-            raise ValueError(
-                f"No Curiosity category file for dataset_name {name!r} (from {metadata}); bundled: {available}. "
-                "Write one (see datasets/MIMIC-IV.yaml) and select it with additional_predicates_file."
-            )
-        return bundled, f"bundled datasets/{name}.yaml (metadata/dataset.json dataset_name)"
 
     def _race(self, frame: pl.LazyFrame) -> pl.LazyFrame:
         """First recorded race per subject and its time (null for a static row); prompts use it only once visible."""
