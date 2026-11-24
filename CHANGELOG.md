@@ -1,6 +1,10 @@
 # Changes
 
-## 0.1.1 (unreleased)
+## 0.1.2 (2026-11-24)
+
+- 100 sampled futures per prediction time by default (`n_samples`; was 60, the paper's 365-day mortality setting).
+
+## 0.1.1 (2026-11-24)
 
 - Dataset-agnostic tokenization (a documented adaptation of the papers): every MEDS code is one whole-code token, with
   no event categories, category files or ICD/ATC hierarchy split. A code with at least `min_bucket_observations`

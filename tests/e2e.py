@@ -32,7 +32,7 @@ TEST_CONFIG = CuriosityConfig(
     n_samples=8, max_new_tokens=48, max_attempts=3, horizon_days=60.0,
     min_bucket_observations=20,
 )
-# Real data (MIMIC-IV demo): the defaults (Curiosity-S size, two-stage context, n=60, 5 x 4,000 tokens, 365 d) on the
+# Real data (MIMIC-IV demo): the defaults (Curiosity-S size, two-stage context, n=100, 5 x 4,000 tokens, 365 d) on the
 # GPU when available; 8-sequence optimizer steps because the demo's ~100 subjects fill only a few 8,192-token windows.
 DEMO_CONFIG = CuriosityConfig(sequences_per_step=8)
 
