@@ -19,7 +19,7 @@ from meds_algorithm.requests import (
 )
 
 from . import _model
-from ._tokenizer import BOS, EOS, PAD, _token_seconds, _Vocabulary
+from ._tokenizer import BOS, EOS, PAD, _token_seconds, _Vocabulary, load_hierarchy
 from .config import CuriosityConfig
 
 DATA_FORMAT, MODEL_FORMAT, TRAJECTORY_FORMAT = "curiosity-events/v2", "curiosity-qwen2/v2", "curiosity-trajectories/v2"
@@ -156,7 +156,8 @@ class Curiosity(ZeroShotMaterializedAlgorithm):
             raise FileNotFoundError(f"{request.meds_dir} has no train split")
         train = pl.scan_parquet(_shards(request.meds_dir, "train"))
         has_race = config.race_column is not None and config.race_column in train.collect_schema()
-        vocabulary = _Vocabulary.fit(train, config, self._race(train) if has_race else None)
+        hierarchy = load_hierarchy(config.hierarchy_file) if config.hierarchy_file is not None else ()
+        vocabulary = _Vocabulary.fit(train, config, self._race(train) if has_race else None, hierarchy)
         vocabulary.save(output / "vocabulary.json")
         counts = {}
         for split in splits:
@@ -174,6 +175,8 @@ class Curiosity(ZeroShotMaterializedAlgorithm):
             "vocabulary": _digest(output / "vocabulary.json"),
             "vocabulary_size": len(vocabulary.tokens),
             "fitted_on": "train",
+            "hierarchy_file": None if config.hierarchy_file is None else {
+                "path": str(config.hierarchy_file), "digest": _digest(config.hierarchy_file)},
             "meds_shards": {str(p.relative_to(request.meds_dir)): _digest(p) for s in splits for p in _shards(request.meds_dir, s)},
             "splits": {split: {"subjects": n, "events": e} for split, (n, e) in counts.items()},
         }, indent=1))

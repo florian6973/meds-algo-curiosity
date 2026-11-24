@@ -1,8 +1,9 @@
 """Curiosity event tokenization, dataset-agnostic (arXiv 2611.15710 Sec. 2 and 2508.12104v3 Sec. 5.2, adapted: see
 IMPLEMENTATION_REPORT.md), fitted on the training split only.
 
-Every MEDS code is one whole-code token: no event categories, no per-dataset mapping and no code-hierarchy split. A
-code with enough numeric values is followed by one of 30 shared percentile-bucket tokens (the paper's lab buckets); a
+Every MEDS code is one whole-code token: no event categories and no per-dataset mapping. Optionally, a hierarchy file
+(``hierarchy_file``) splits the codes its rules match into a head token and depth-tagged sub-tokens (e.g. ICD codes
+3/2/2, as in the 0226 paper), so a rare code shares its ancestors' tokens. A code with enough numeric values is followed by one of 30 shared percentile-bucket tokens (the paper's lab buckets); a
 value-less row of a code with text values by a result token; a row carrying the optional ``route``, ``dose`` or
 ``frequency`` columns by attribute tokens. Codes below one frequency threshold become ``[UNK]``, as in the paper;
 rarer result and attribute values become ``RESULT//[OTHER]`` or are dropped. Only MEDS standard codes are special:
@@ -26,6 +27,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -33,6 +35,7 @@ from statistics import NormalDist
 
 import numpy as np
 import polars as pl
+import yaml
 
 from .config import CuriosityConfig
 
@@ -112,6 +115,65 @@ def year_token(year: int) -> str:
     return f"YEAR//{low}-{low + 4}"
 
 
+EXAMPLE_HIERARCHIES = Path(__file__).parent / "hierarchies"  # shipped example hierarchy files
+
+
+def load_hierarchy(path: Path | str) -> tuple[dict, ...]:
+    """Validated hierarchy rules from a YAML file: ``hierarchy: [{code: {regex: ...}, separator: ...}, ...]``.
+
+    Each rule's regex is matched at the start of a code; the matched prefix stays in the head token and the rest of
+    the code is split, either on ``separator`` or into parts of the given character ``widths`` (any remainder is a
+    last part). The first matching rule applies; codes no rule matches stay whole.
+    """
+    data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    rules = data.get("hierarchy") if isinstance(data, dict) else None
+    if not isinstance(rules, list) or not rules:
+        raise ValueError(f"{path} must define a non-empty 'hierarchy' list")
+    out = []
+    for i, rule in enumerate(rules):
+        if not isinstance(rule, dict) or set(rule) - {"code", "separator", "widths"}:
+            raise ValueError(f"{path}: rule {i} may only have code, separator and widths")
+        regex = rule.get("code", {}).get("regex") if isinstance(rule.get("code"), dict) else None
+        if not isinstance(regex, str) or not regex:
+            raise ValueError(f"{path}: rule {i} needs code: {{regex: ...}}")
+        re.compile(regex)
+        separator, widths = rule.get("separator"), rule.get("widths")
+        if (separator is None) == (widths is None):
+            raise ValueError(f"{path}: rule {i} needs exactly one of separator and widths")
+        if separator is not None and (not isinstance(separator, str) or not separator):
+            raise ValueError(f"{path}: rule {i} separator must be a non-empty string")
+        if widths is not None and (not isinstance(widths, list) or not widths
+                                   or not all(isinstance(w, int) and w > 0 for w in widths)):
+            raise ValueError(f"{path}: rule {i} widths must be a non-empty list of positive integers")
+        out.append({"regex": regex, "separator": separator, "widths": widths})
+    return tuple(out)
+
+
+def split_code(code: str, rules: tuple[dict, ...]) -> tuple[str, tuple[str, ...], str] | None:
+    """``(head, sub-parts, joiner)`` for the first rule matching ``code`` with something after its prefix, or None.
+    ``head + joiner.join(...)`` of the parts gives back the code exactly."""
+    for rule in rules:
+        match = re.match(rule["regex"], code)
+        if match is None or match.end() >= len(code):
+            continue
+        prefix, rest = code[: match.end()], code[match.end():]
+        if rule["separator"] is not None:
+            parts, joiner = rest.split(rule["separator"]), rule["separator"]
+        else:
+            parts, start = [], 0
+            for width in rule["widths"]:
+                parts.append(rest[start: start + width])
+                start += width
+            parts = [part for part in [*parts, rest[start:]] if part]
+            joiner = ""
+        return prefix + parts[0], tuple(parts[1:]), joiner
+    return None
+
+
+def _sub_token(depth: int, part: str) -> str:
+    return f"SUB//{depth}//{part}"
+
+
 def _with_columns(frame: pl.LazyFrame) -> pl.LazyFrame:
     schema = frame.collect_schema()
     missing = [pl.lit(None, dtype=pl.String).alias(c) for c in _EVENT_COLUMNS if c not in schema]
@@ -163,10 +225,14 @@ class _Vocabulary:
     quantiles: dict[str, tuple[float, ...]]  # code -> (min, q(levels)..., max): value buckets
     text_codes: tuple[str, ...]  # codes whose value-less rows get result tokens
     cutoff: str  # latest training time (ISO): right-censoring bound
+    hierarchy: tuple[dict, ...] = ()  # rules of the hierarchy file (frozen here, so later steps need no file)
+    joiners: dict[str, str] | None = None  # head token text -> joiner of its sub-parts (decoding)
+    split_codes: tuple[str, ...] = ()  # training codes split into parts that are all in the vocabulary
 
     # ---- fitting -----------------------------------------------------------------------------------------------
     @classmethod
-    def fit(cls, train: pl.LazyFrame, config: CuriosityConfig, race: pl.LazyFrame | None) -> _Vocabulary:
+    def fit(cls, train: pl.LazyFrame, config: CuriosityConfig, race: pl.LazyFrame | None,
+            hierarchy: tuple[dict, ...] = ()) -> _Vocabulary:
         rows = _with_columns(train).filter(pl.col("code") != BIRTH_CODE).collect()
         timed = rows.filter(pl.col("time").is_not_null())
         floor = max(config.min_code_count, config.min_code_share * timed.height)
@@ -176,8 +242,28 @@ class _Vocabulary:
             counts = values.drop_nulls().value_counts()
             return sorted(counts.filter(pl.col("count") >= floor)[values.name].to_list())
 
-        codes = kept(rows["code"])
-        in_vocabulary = rows.filter(pl.col("code").is_in(codes))
+        # Whole codes, or (hierarchy) heads and depth-tagged sub-parts, each kept by the same threshold.
+        code_counts = dict(rows["code"].value_counts().iter_rows())
+        splits = {code: split_code(code, hierarchy) for code in code_counts} if hierarchy else {}
+        whole, heads, subs, joiners = {}, {}, {}, {}
+        for code, n in code_counts.items():
+            split = splits.get(code)
+            if split is None:
+                whole[code] = n
+                continue
+            head, parts, joiner = split
+            heads[head] = heads.get(head, 0) + n
+            joiners[head] = joiner
+            for depth, part in enumerate(parts, 1):
+                subs[(depth, part)] = subs.get((depth, part), 0) + n
+        codes = sorted(code for code, n in whole.items() if n >= floor)
+        kept_heads = sorted(head for head, n in heads.items() if n >= floor)
+        kept_subs = sorted(key for key, n in subs.items() if n >= floor)
+        known_heads, known_subs = set(kept_heads), set(kept_subs)
+        split_known = [code for code, split in splits.items() if split is not None and split[0] in known_heads]
+        split_codes = sorted(code for code in split_known
+                             if all((depth, part) in known_subs for depth, part in enumerate(splits[code][1], 1)))
+        in_vocabulary = rows.filter(pl.col("code").is_in([*codes, *split_known]))
         numeric = in_vocabulary.filter(_numeric())
         bucketed = numeric.group_by("code").len().filter(pl.col("len") >= config.min_bucket_observations)["code"]
         text = in_vocabulary.filter(pl.col("numeric_value").is_null() & pl.col("text_value").is_not_null())
@@ -204,10 +290,13 @@ class _Vocabulary:
             *(f"RESULT//{v}" for v in results), "RESULT//[OTHER]", "RESULT//[MISSING]",
             *attributes,
             *(f"CODE//{code}" for code in codes),
+            *(f"CODE//{head}" for head in kept_heads),
+            *(_sub_token(depth, part) for depth, part in kept_subs),
         )
         cutoff = timed["time"].max()
         return cls(tuple(dict.fromkeys(tokens)), quantiles, tuple(text_codes),
-                   (cutoff or datetime(1970, 1, 1)).isoformat())
+                   (cutoff or datetime(1970, 1, 1)).isoformat(), tuple(hierarchy),
+                   {head: joiners[head] for head in kept_heads}, tuple(split_codes))
 
     # ---- persistence ---------------------------------------------------------------------------------------------
     def save(self, path: Path) -> None:
@@ -216,13 +305,17 @@ class _Vocabulary:
             "quantiles": {code: list(edges) for code, edges in self.quantiles.items()},
             "text_codes": list(self.text_codes),
             "cutoff": self.cutoff,
+            "hierarchy": list(self.hierarchy),
+            "joiners": self.joiners or {},
+            "split_codes": list(self.split_codes),
         }, sort_keys=True))
 
     @classmethod
     def load(cls, path: Path) -> _Vocabulary:
         v = json.loads(path.read_text())
         return cls(tuple(v["tokens"]), {code: tuple(edges) for code, edges in v["quantiles"].items()},
-                   tuple(v["text_codes"]), v["cutoff"])
+                   tuple(v["text_codes"]), v["cutoff"], tuple(v.get("hierarchy", ())), v.get("joiners") or {},
+                   tuple(v.get("split_codes", ())))
 
     # ---- lookups -------------------------------------------------------------------------------------------------
     @property
@@ -230,8 +323,30 @@ class _Vocabulary:
         return {token: index for index, token in enumerate(self.tokens)}
 
     def codes(self) -> set[str]:
-        """Every MEDS code with a token in the fitted vocabulary."""
-        return {token[6:] for token in self.tokens if token.startswith("CODE//")}
+        """Every MEDS code the vocabulary can generate: whole-code and head tokens, and the training codes whose
+        hierarchy parts are all in the vocabulary."""
+        return {token[6:] for token in self.tokens if token.startswith("CODE//")} | set(self.split_codes)
+
+    def _code_tokens(self, codes: list[str]) -> dict[str, list[int]]:
+        """Token ids of each code: a whole-code token; or a head token and its sub-tokens up to the first rare part
+        (the code is then represented by its known ancestor); ``[UNK]`` for a rare code or head."""
+        ids, out = self.ids, {}
+        for code in codes:
+            split = split_code(code, self.hierarchy) if self.hierarchy else None
+            if split is None:
+                out[code] = [ids.get(f"CODE//{code}", ids[UNK])]
+                continue
+            head, parts, _ = split
+            if f"CODE//{head}" not in ids:
+                out[code] = [ids[UNK]]
+                continue
+            tokens = [ids[f"CODE//{head}"]]
+            for depth, part in enumerate(parts, 1):
+                if _sub_token(depth, part) not in ids:
+                    break
+                tokens.append(ids[_sub_token(depth, part)])
+            out[code] = tokens
+        return out
 
     # ---- events --------------------------------------------------------------------------------------------------
     def events(self, frame: pl.DataFrame, race: pl.DataFrame | None, config: CuriosityConfig) -> tuple[pl.DataFrame, pl.DataFrame]:
@@ -243,11 +358,12 @@ class _Vocabulary:
         """
         ids = self.ids
         rows = _with_columns(frame.lazy()).collect()
-        code_ids = pl.DataFrame({"code": [t[6:] for t in self.tokens if t.startswith("CODE//")],
-                                 "_code_id": [ids[t] for t in self.tokens if t.startswith("CODE//")]},
-                                schema={"code": pl.String, "_code_id": pl.Int32})
-        rows = rows.join(code_ids, on="code", how="left").with_columns(pl.col("_code_id").fill_null(ids[UNK]))
-        code = pl.concat_list("_code_id")
+        mapping = self._code_tokens(rows["code"].unique().drop_nulls().to_list())
+        code_ids = pl.DataFrame({"code": list(mapping), "_code": list(mapping.values())},
+                                schema={"code": pl.String, "_code": pl.List(pl.Int32)})
+        rows = rows.join(code_ids, on="code", how="left").with_columns(
+            pl.col("_code").fill_null(pl.lit([ids[UNK]], dtype=pl.List(pl.Int32))))
+        code = pl.col("_code")
         timed = rows.filter(pl.col("time").is_not_null() & ~pl.col("code").is_in([BIRTH_CODE, DEATH_CODE]))
 
         # Value token: a percentile bucket, a result token (value-less rows of text codes), or nothing.
@@ -292,11 +408,11 @@ class _Vocabulary:
         # record without death is right-censored.
         deaths = rows.filter((pl.col("code") == DEATH_CODE) & pl.col("time").is_not_null()).group_by("subject_id").agg(
             pl.col("time").min().dt.date().cast(pl.Datetime("us")).add(pl.duration(days=1, microseconds=-1)).alias("death"),
-            pl.col("_code_id").first(),
+            pl.col("_code").first(),
         )
         parts.append(deaths.select(
             "subject_id", pl.col("death").alias("time"), pl.lit(float("inf")).alias("order"),
-            pl.concat_list("_code_id", pl.lit(ids[EOS], dtype=pl.Int32)).alias("tokens"),
+            pl.concat_list("_code", pl.lit(ids[EOS], dtype=pl.Int32)).alias("tokens"),
             pl.lit(None, dtype=pl.Datetime("us")).alias("superseded"),
         ))
         events = (
@@ -422,13 +538,16 @@ class _Vocabulary:
         """
         clock, events, invalid = prediction_time, [], 0
         future = prediction_time + timedelta(microseconds=1)
-        code = value = text = None
+        joiners = self.joiners or {}
+        code = value = text = joiner = None
+        depth = 0
 
         def flush():
-            nonlocal code, value, text
+            nonlocal code, value, text, joiner, depth
             if code is not None:
                 events.append((max(clock, future), code, value, text))
-            code = value = text = None
+            code = value = text = joiner = None
+            depth = 0
 
         for position, index in enumerate(tokens):
             token = self.tokens[index]
@@ -441,7 +560,13 @@ class _Vocabulary:
                 clock += timedelta(seconds=_token_seconds(token))
             elif kind == "CODE":
                 flush()
-                code = rest
+                code, joiner = rest, joiners.get(rest)
+            elif kind == "SUB":
+                level, _, part = rest.partition("//")
+                if joiner is not None and value is None and text is None and int(level) == depth + 1:
+                    code, depth = code + joiner + part, depth + 1
+                else:
+                    invalid += 1
             elif kind == "LABQ":
                 if code in self.quantiles and value is None:
                     edges, bucket = self.quantiles[code], int(rest)

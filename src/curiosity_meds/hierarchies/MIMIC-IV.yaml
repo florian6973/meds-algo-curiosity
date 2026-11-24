@@ -1,0 +1,21 @@
+# Example hierarchy file for MIMIC-IV-MEDS (0.4.0 and 0.1.0 codes); select it with
+# CuriosityConfig(hierarchy_file=...). Without a hierarchy file every code is one whole token.
+#
+# Each rule's regex is matched at the start of a code. The matched prefix stays in the head token; the rest is split on
+# `separator`, or into parts of the given character `widths` (any remainder is a last part). The head and each
+# depth-tagged part are kept by the vocabulary's frequency threshold, so a rare code shares its ancestors' tokens. The
+# first matching rule applies; codes no rule matches (labs, chart events, ...) stay whole, so units such as mg/dL are
+# never split.
+hierarchy:
+  # ICD-9-CM and ICD-10-CM diagnoses (DIAGNOSIS//ICD//<9CM|10CM> in 0.4.0, <9|10> in 0.1.0), split 3/2/2 as in the
+  # Curiosity-0226 paper (Sec. 5.2.3): DIAGNOSIS//ICD//10CM//E1165 -> DIAGNOSIS//ICD//10CM//E11, SUB//1//65.
+  - code: { regex: "^DIAGNOSIS//ICD//(9|10)(CM)?//" }
+    widths: [3, 2, 2]
+
+# Other datasets, for example:
+#   ATC-coded medications, split 3/2/rest as in Curiosity-0826 (Sec. 2.6):
+#     - code: { regex: "^MEDICATION//ATC//" }
+#       widths: [3, 2]
+#   eICU-MEDS diagnosis paths such as DIAGNOSIS//cardiovascular|shock|septic shock:
+#     - code: { regex: "^DIAGNOSIS//" }
+#       separator: "|"

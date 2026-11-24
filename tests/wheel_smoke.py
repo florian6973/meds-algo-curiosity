@@ -34,6 +34,9 @@ def main():
                            "code": ["HR"] * 12, "numeric_value": [80.0 + h for h in range(12)]}).with_columns(
                                pl.col("time").str.to_datetime())
     assert "CODE//HR" in _Vocabulary.fit(events.lazy(), config, None).tokens
+    from curiosity_meds._tokenizer import EXAMPLE_HIERARCHIES, load_hierarchy
+
+    assert load_hierarchy(EXAMPLE_HIERARCHIES / "MIMIC-IV.yaml")  # the example hierarchy file ships in the wheel
     with tempfile.TemporaryDirectory() as directory:
         assert CuriosityConfig.load(config.save(Path(directory) / "config.json")) == config
     assert build_model(CuriosityConfig(capacity=1 / 12, num_layers=1), 32, 0).config.hidden_size == 64

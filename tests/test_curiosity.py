@@ -388,3 +388,64 @@ def test_size_can_be_overridden_and_is_validated():
         CuriosityConfig(num_layers=0)
 
 
+
+
+# ---- hierarchy file ------------------------------------------------------------------------------------------------
+ICD_RULES = ({"regex": "^DIAGNOSIS//ICD//(9|10)(CM)?//", "separator": None, "widths": [3, 2, 2]},
+             {"regex": "^DIAGNOSIS//", "separator": "|", "widths": None})
+
+
+def test_split_code_after_the_matched_prefix():
+    from curiosity_meds._tokenizer import split_code
+
+    assert split_code("DIAGNOSIS//ICD//10CM//E1165", ICD_RULES) == ("DIAGNOSIS//ICD//10CM//E11", ("65",), "")
+    assert split_code("DIAGNOSIS//ICD//9//25000", ICD_RULES) == ("DIAGNOSIS//ICD//9//250", ("00",), "")
+    assert split_code("DIAGNOSIS//ICD//10CM//S72001AXY", ICD_RULES) == (
+        "DIAGNOSIS//ICD//10CM//S72", ("00", "1A", "XY"), "")  # remainder beyond the widths: a last part
+    assert split_code("DIAGNOSIS//cardiovascular|shock|septic shock", ICD_RULES) == (
+        "DIAGNOSIS//cardiovascular", ("shock", "septic shock"), "|")
+    assert split_code("LAB//RESULT//50912//mg/dL", ICD_RULES) is None  # no rule: whole, units never split
+
+
+def test_hierarchy_files_are_validated(tmp_path):
+    from curiosity_meds._tokenizer import EXAMPLE_HIERARCHIES, load_hierarchy, split_code
+
+    shipped = load_hierarchy(EXAMPLE_HIERARCHIES / "MIMIC-IV.yaml")
+    for code in ("DIAGNOSIS//ICD//10CM//E1165", "DIAGNOSIS//ICD//10//E1165"):  # MIMIC-IV-MEDS 0.4.0 and 0.1.0
+        assert split_code(code, shipped)[1] == ("65",)
+    bad = tmp_path / "bad.yaml"
+    for text, match in [("hierarchy: []", "non-empty"), ("hierarchy: [{code: X, widths: [3]}]", "regex"),
+                        ("hierarchy: [{code: {regex: '^A'}}]", "exactly one"),
+                        ("hierarchy: [{code: {regex: '^A'}, widths: [0]}]", "positive")]:
+        bad.write_text(text)
+        with pytest.raises(ValueError, match=match):
+            load_hierarchy(bad)
+
+
+def test_hierarchy_tokens_share_ancestors_truncate_rare_parts_and_decode_exactly():
+    rows = [(40 + i, _hours(i), code) for i, code in enumerate(
+        ["DIAGNOSIS//ICD//10CM//E1165"] * 3 + ["DIAGNOSIS//ICD//10CM//E119"] * 3 + ["DIAGNOSIS//ICD//10CM//E1178"])]
+    frame = _events(rows)
+    rare = dataclasses.replace(CONFIG, min_code_count=2)
+    fitted = _Vocabulary.fit(frame.lazy(), rare, None, ICD_RULES)
+    assert {"CODE//DIAGNOSIS//ICD//10CM//E11", "SUB//1//65", "SUB//1//9"} <= set(fitted.tokens)
+    assert "SUB//1//78" not in fitted.tokens and "CODE//DIAGNOSIS//ICD//10CM//E1165" not in fitted.tokens
+    sequences = _sequences(fitted, frame, config=rare)["tokens"].to_list()
+    tokens = [_tokens(fitted, s) for s in sequences]
+    assert tokens[0][-2:] == ["CODE//DIAGNOSIS//ICD//10CM//E11", "SUB//1//65"]
+    assert tokens[-1][-1] == "CODE//DIAGNOSIS//ICD//10CM//E11"  # E1178: rare part, represented by its ancestor E11
+    ids = fitted.ids
+    events, _, invalid = fitted.decode([ids["CODE//DIAGNOSIS//ICD//10CM//E11"], ids["SUB//1//9"]], T0, np.zeros(2))
+    assert [e[1] for e in events] == ["DIAGNOSIS//ICD//10CM//E119"] and invalid == 0
+    assert fitted.decode([ids["SUB//1//9"]], T0, np.zeros(1))[2] == 1  # orphan part
+    assert {"DIAGNOSIS//ICD//10CM//E1165", "DIAGNOSIS//ICD//10CM//E119"} <= fitted.codes()
+    assert _Vocabulary.load(_saved(fitted)).joiners == fitted.joiners
+
+
+def _saved(vocabulary):
+    import tempfile
+    from pathlib import Path
+
+    path = Path(tempfile.mkdtemp()) / "vocabulary.json"
+    vocabulary.save(path)
+    return path

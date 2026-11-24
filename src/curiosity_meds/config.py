@@ -3,6 +3,7 @@ it does not describe is unchanged from Curiosity-0226-1B (arXiv 2508.12104v3). "
 leave unspecified (IMPLEMENTATION_REPORT.md)."""
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from meds_algorithm import NNConfig
 
@@ -39,6 +40,10 @@ class CuriosityConfig(NNConfig):
     min_code_share: float = 1e-6
     min_bucket_observations: int = 500
     downsample_hours: float | None = 6.0
+    # Optional YAML of hierarchy rules: codes a rule matches are split after the rule's matched prefix, on a separator
+    # or into character widths, into a head token and depth-tagged sub-tokens (rare parts truncate the code to its
+    # known ancestor). None keeps every code whole. Example: curiosity_meds/hierarchies/MIMIC-IV.yaml (ICD 3/2/2).
+    hierarchy_file: Path | None = None
     race_column: str | None = "race"
     # Right-censoring (paper Sec. 2.2.2): a record without death is padded with six-month time tokens up to the
     # data cutoff. Cutoff per subject = min(latest training time, last event + follow_up_days); MIMIC-IV records
