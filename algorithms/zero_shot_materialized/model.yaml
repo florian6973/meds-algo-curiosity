@@ -10,7 +10,7 @@
 ## Zero-shot commands receive the task itself through {task_criteria_path}, which needs the MEDS-DEV
 ## passthrough described in SPEC.md section 2.4 (the analogue of {predicates_path}).
 metadata:
-  description: "Curiosity (CoMET) generative medical event model: Qwen2 decoder pretrained on tokenized MEDS timelines, zero-shot task prediction by Monte Carlo generation of future timelines."
+  description: "Curiosity-0826 generative medical event model: Qwen2 decoder pretrained on tokenized MEDS timelines, zero-shot task prediction by Monte Carlo generation of future timelines."
   contacts:
     - name: "Florent Pollet"
       email: "flo1.raymond@gmail.com"
