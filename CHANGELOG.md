@@ -1,6 +1,14 @@
 # Changes
 
-## 0.1.0 (unreleased)
+## 0.1.1 (2026-11-24)
+
+- An `other` category (on by default; `other_category=False` restores the papers' vocabulary): every code no paper
+  category matches, e.g. ICU charting, is kept as a whole-code token with a shared value bucket, latest value per
+  code in each 6-hour window. Tasks on such codes (mean arterial pressure for hypotension) can be answered.
+- A dataset needs no category file: without one, every code is `other` and death is the MEDS standard `MEDS_DEATH`.
+  A category file only adds the papers' handling (ICD/ATC splits, lab and vital tokens, demographics).
+
+## 0.1.0 (2026-11-24)
 
 - Curiosity-0826 (arXiv 2611.15710) as a `zero_shot_materialized` MEDS algorithm, replacing the earlier
   Curiosity-0226 port: BOS-first sequences, age/year at start of timeline with pediatric buckets, birth,

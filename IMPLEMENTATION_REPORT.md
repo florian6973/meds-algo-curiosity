@@ -29,6 +29,7 @@
 | Missing/conflicting detail | Sources consulted | Options and scientific consequences | Choice/rationale and status | User decision or source resolution | Affected code/tests/results |
 |---|---|---|---|---|---|
 | Which version to implement | 0226 and 0826 papers | Keep both behind a switch / 0826 only | 0826 only | **Confirmed** by Florent (2026-11-20): "just use the last curiosity version, don't try to make it generic"; pediatric/birth representations must stay supported for other datasets | whole package |
+| Codes outside the papers' event categories (e.g. ICU charting: mean arterial pressure for MEDS-DEV's hypotension task) | 0226 Sec. 5.2.8 and 0826 Sec. 2 (fixed vocabulary; charting excluded); MEDS-DEV tasks on chart codes | Drop them (faithful; such tasks are rejected as ungenerable, and every dataset needs a category file) / keep them as an `other` category | `other` category, on by default: whole-code token, shared 30-bucket value token when ≥ `lab_min_bucket_observations` values, share threshold as procedures, latest value per code in each 6-hour window (as the paper's vitals). Without a category file every code is `other` and death is `MEDS_DEATH`. `other_category=False` gives the papers' vocabulary | **Confirmed** by Florent (2026-11-24): "yes because otherwise a new dataset we would first to populate the different event categories"; supersedes "paper categories only" (2026-11-09) | `category_predicates`, `_categorized`, `_supersede`, `_Vocabulary.fit/events`; `test_other_codes_get_value_buckets_and_are_downsampled_causally`, `test_a_dataset_without_category_file_runs_with_other_only` |
 | Which MIMIC-IV codes form each category | 0826 Sec. 2, Table 2; MIMIC-IV-MEDS 0.1.0 and HEAD `event_configs.yaml`; ETL survey (below) | — | Dataset knowledge lives in `datasets/MIMIC-IV.yaml` (ACES plain predicates; `null` = not recorded) | Category-file approach **confirmed** 2026-11-09 for 0226; MIMIC entries below | `datasets/MIMIC-IV.yaml`, `category_predicates` |
 | Lab collection marker (0826 Sec. 2.3.1) | MIMIC-IV-MEDS ≥ 0.1.0 (`LAB//SPECIMEN_COLLECTED` at charttime, `LAB//RESULT` at storetime), eICU-MEDS (SPECIMEN_DRAWN/RESULT); NWICU, INSPIRE, AUMCdb, SICdb, HiRID, OMOP: one row, no result time | Synthesize a marker at result − 1 s (paper fallback) / use the ETL's own rows | Use the ETL's value-less lab rows as markers; never synthesize. On single-row ETLs a synthesized marker would duplicate every lab at the same time with no information | Resolved from the ETL survey; reported to Florent 2026-11-20 | `lab` category, `events` |
 | Vitals source in MIMIC-IV | MIMIC-IV-MEDS: chartevents (exact times), hosp/omr (00:00 of chartdate; 0.1.0 stores `S/D` text) | chartevents only / + OMR | chartevents non-invasive + arterial BP, weight (kg, lbs), height (cm, in); OMR excluded because its 00:00 time makes a value visible before it was measured that day | **Confirmed** by Florent (2026-11-20): "ok good to keep vitals like this, documented" | `datasets/MIMIC-IV.yaml` |
@@ -112,10 +113,11 @@
 - MEDS assumptions: split-sharded MEDS (`data/<split>/*.parquet`) with `subject_id`, `time`, `code`, `numeric_value`;
   optional `text_value` (non-numeric labs, text vitals), `race` (MIMIC-IV-MEDS admission rows), and medication
   columns `route`, `dose`, `frequency`. `train` is required; `tuning` is optional. `MEDS_BIRTH` dates the age token.
-- Dataset category files: one ACES plain predicate per category in `config.CATEGORIES` (`curiosity_sex` …
-  `curiosity_procedure`; `null` when the dataset does not record it), selected from `additional_predicates_file`,
-  else the bundled `datasets/<dataset_name>.yaml` named by the dataset's `metadata/dataset.json`, else an error.
-  Only `MIMIC-IV.yaml` is bundled (MIMIC-IV-MEDS 0.1.0 conventions).
+- Dataset category files (optional): one ACES plain predicate per category in `config.CATEGORIES` (`curiosity_sex`
+  … `curiosity_procedure`; omitted when the dataset does not record it), selected from `additional_predicates_file`,
+  else the bundled `datasets/<dataset_name>.yaml` named by the dataset's `metadata/dataset.json`, else none: every
+  code is then `other` and death is `MEDS_DEATH` (an error only with `other_category=False`). Only `MIMIC-IV.yaml` is
+  bundled (MIMIC-IV-MEDS 0.4.0 and 0.1.0 layouts).
 - Required predicate names: preprocessing needs the `curiosity_*` predicates only; prediction needs the task's
   criteria and the dataset predicates MEDS-DEV binds.
 - Predicate interpretation and derived features: predicates are interpreted only by ACES on real history + generated
@@ -132,7 +134,8 @@
 
 ## Scientific deviations
 
-1. Data and vocabulary: Epic Cosmos is replaced by MIMIC-IV codes (no ATC, LOINC, CPT; no chief complaint, births,
+1. Vocabulary: codes outside the papers' event categories are kept as `other` tokens by default (decision above).
+   Data: Epic Cosmos is replaced by MIMIC-IV codes (no ATC, LOINC, CPT; no chief complaint, births,
    gestational age, birth weight, cause of death or patient-reported medications; OMR excluded pending decision).
 2. Thresholds are shares of the dataset's events, not Cosmos counts; the right-censoring cutoff is per subject.
 3. Scale: Curiosity-S size, early stopping on tuning loss; stage 2 as specified but at a routine learning rate.

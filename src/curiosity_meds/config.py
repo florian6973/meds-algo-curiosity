@@ -68,6 +68,13 @@ class CuriosityConfig(NNConfig):
     lab_min_bucket_observations: int = 500  # absolute: lab-unit pairs with fewer values are excluded
     procedure_min_share: float = 10_000 / _PROCEDURES
     medication_attribute_min_share: float = 10_000 / _MEDICATIONS  # rarer route/dose/frequency -> null
+    # Other (an adaptation, not in the papers): codes no paper category matches, e.g. ICU charting, are kept as whole
+    # code tokens with a value bucket, so tasks on them can be answered and a dataset needs no category file. False
+    # gives the papers' vocabulary (other codes dropped). Same share threshold as procedures; the latest value per
+    # code in each other_window_hours window is kept, as the paper does for vitals (None keeps every value).
+    other_category: bool = True
+    other_min_share: float = 10_000 / _PROCEDURES
+    other_window_hours: float | None = 6.0
     race_column: str | None = "race"
     # Right-censoring (paper Sec. 2.2.2): a record without death is padded with six-month time tokens up to the
     # data cutoff. Cutoff per subject = min(latest training time, last event + follow_up_days); MIMIC-IV records
@@ -139,7 +146,7 @@ class CuriosityConfig(NNConfig):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} must be positive")
         shares = ("lab_numeric_min_share", "lab_text_min_share", "lab_text_value_min_share", "procedure_min_share",
-                  "medication_attribute_min_share")
+                  "medication_attribute_min_share", "other_min_share")
         for name in shares:
             if not 0 <= getattr(self, name) < 1:
                 raise ValueError(f"{name} must be in [0, 1)")
@@ -151,6 +158,8 @@ class CuriosityConfig(NNConfig):
             raise ValueError("extension_steps and extension_epochs must be nonnegative")
         if self.generation_context <= self.max_new_tokens:
             raise ValueError("the generation context must exceed max_new_tokens to leave room for the prompt")
+        if self.other_window_hours is not None and self.other_window_hours <= 0:
+            raise ValueError("other_window_hours must be positive or None")
         if self.early_stopping_patience < 0:
             raise ValueError("early_stopping_patience must be nonnegative")
         if not 0 <= self.warmup_fraction < 1 or not 0 < self.final_lr_ratio <= 1:

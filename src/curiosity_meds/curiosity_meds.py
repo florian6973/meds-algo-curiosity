@@ -99,7 +99,7 @@ def _check_generable(task, vocabulary: _Vocabulary) -> None:
     if missing:
         raise ValueError(
             f"The task needs predicates {missing} after the prediction time, but the fitted vocabulary cannot "
-            "generate any matching event (Curiosity keeps only the paper's event categories)"
+            "generate any matching event (the codes are not in the training vocabulary, or other_category is off)"
         )
 
 
@@ -163,10 +163,11 @@ class Curiosity(ZeroShotMaterializedAlgorithm):
         if "train" not in splits or not _shards(request.meds_dir, "train"):
             raise FileNotFoundError(f"{request.meds_dir} has no train split")
         category_file, category_source = self._category_file(request)
-        predicates = (yaml.safe_load(category_file.read_text()) or {}).get("predicates") or {}
+        predicates = {} if category_file is None else (yaml.safe_load(category_file.read_text()) or {}).get("predicates") or {}
         train = pl.scan_parquet(_shards(request.meds_dir, "train"))
         has_race = config.race_column is not None and config.race_column in train.collect_schema()
-        vocabulary = _Vocabulary.fit(train, config, category_predicates(predicates), self._race(train) if has_race else None)
+        categories = category_predicates(predicates, other=config.other_category)
+        vocabulary = _Vocabulary.fit(train, config, categories, self._race(train) if has_race else None)
         vocabulary.save(output / "vocabulary.json")
         counts = {}
         for split in splits:
@@ -184,20 +185,24 @@ class Curiosity(ZeroShotMaterializedAlgorithm):
             "vocabulary": _digest(output / "vocabulary.json"),
             "vocabulary_size": len(vocabulary.tokens),
             "fitted_on": "train",
-            "category_predicates": {"source": category_source, "path": str(category_file), "digest": _digest(category_file)},
+            "category_predicates": {"source": category_source, "path": None if category_file is None else str(category_file),
+                                    "digest": None if category_file is None else _digest(category_file)},
             "meds_shards": {str(p.relative_to(request.meds_dir)): _digest(p) for s in splits for p in _shards(request.meds_dir, s)},
             "splits": {split: {"subjects": n, "events": e} for split, (n, e) in counts.items()},
         }, indent=1))
         return PayloadMetadata("curiosity-events", 2)
 
-    def _category_file(self, request: PreprocessDataRequest) -> tuple[Path, str]:
+    def _category_file(self, request: PreprocessDataRequest) -> tuple[Path | None, str]:
         """The dataset category file: an explicit ``additional_predicates_file`` (composed by the runner), else
-        the bundled ``datasets/<dataset_name>.yaml`` named by the MEDS dataset's own ``metadata/dataset.json``."""
+        the bundled ``datasets/<dataset_name>.yaml`` named by the MEDS dataset's own ``metadata/dataset.json``, else
+        none: with the ``other`` category every code is kept (death as MEDS_DEATH), so any MEDS dataset runs."""
         if self.config.additional_predicates_file is not None:
             return Path(request.predicates_file), "additional_predicates_file"
         metadata = Path(request.meds_dir) / "metadata" / "dataset.json"
         name = json.loads(metadata.read_text()).get("dataset_name") if metadata.is_file() else None
         bundled = DATASETS_DIR / f"{name}.yaml"
+        if (not name or not bundled.is_file()) and self.config.other_category:
+            return None, f"none for dataset_name {name!r}: paper categories unmapped, every code in 'other'"
         if not name or not bundled.is_file():
             available = sorted(path.stem for path in DATASETS_DIR.glob("*.yaml"))
             raise ValueError(

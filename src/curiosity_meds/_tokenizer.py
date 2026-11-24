@@ -152,19 +152,25 @@ def _sub_token(kind: str, position: int, part: str) -> str:
     return f"{kind}//{'4-5' if position == 1 else '6-'}//{part}"
 
 
-def category_predicates(predicates: Mapping[str, Any]) -> tuple[tuple[str, dict], ...]:
-    """``(category, ACES plain-predicate spec)`` in matching order from a dataset category file. A category the dataset
-    does not record is omitted (core rejects empty predicates); an unknown ``curiosity_*`` name is an error, so a typo
-    cannot silently drop a category."""
+def category_predicates(predicates: Mapping[str, Any], other: bool = True) -> tuple[tuple[str, dict | None], ...]:
+    """``(category, ACES plain-predicate spec)`` in matching order from a dataset category file (possibly empty).
+
+    A category the dataset does not record is omitted (core rejects empty predicates); an unknown ``curiosity_*`` name
+    is an error, so a typo cannot silently drop a category. ``death`` defaults to the MEDS standard ``MEDS_DEATH``.
+    With ``other``, a final ``("other", None)`` entry takes every code no paper category matched (except
+    ``MEDS_BIRTH``, which only dates the age token); without it (paper-only vocabulary) those codes are dropped.
+    """
     known = {f"curiosity_{c}" for c in CATEGORIES}
     unknown = sorted(name for name in predicates if name.startswith("curiosity_") and name not in known)
     if unknown:
         raise ValueError(f"Unknown Curiosity categories {unknown}; expected names among {sorted(known)}")
-    if not known & predicates.keys():
-        raise ValueError("The dataset category file defines no curiosity_* category")
+    if not other and not known & predicates.keys():
+        raise ValueError("A paper-only vocabulary needs a dataset category file defining curiosity_* categories")
     selected = []
     for category in CATEGORIES:
         spec = predicates.get(f"curiosity_{category}")
+        if spec is None and category == "death":
+            spec = {"code": "MEDS_DEATH"}
         if spec is None:
             continue
         spec = dict(spec)
@@ -172,6 +178,8 @@ def category_predicates(predicates: Mapping[str, Any]) -> tuple[tuple[str, dict]
             raise ValueError(f"curiosity_{category} must be an ACES plain predicate on code/numeric_value")
         PlainPredicateConfig(**spec).MEDS_eval_expr()  # rejects malformed code fields early
         selected.append((category, spec))
+    if other:
+        selected.append(("other", None))
     return tuple(selected)
 
 
@@ -185,12 +193,31 @@ def _with_columns(frame: pl.LazyFrame) -> pl.LazyFrame:
     )
 
 
-def _categorized(frame: pl.LazyFrame, categories: tuple[tuple[str, dict], ...]) -> pl.LazyFrame:
+def _categorized(frame: pl.LazyFrame, categories: tuple[tuple[str, dict | None], ...]) -> pl.LazyFrame:
     category = pl.lit(None, dtype=pl.String)
     for name, spec in reversed(categories):
-        category = pl.when(PlainPredicateConfig(**spec).MEDS_eval_expr()).then(pl.lit(name)).otherwise(category)
+        matches = pl.col("code") != "MEDS_BIRTH" if spec is None else PlainPredicateConfig(**spec).MEDS_eval_expr()
+        category = pl.when(matches).then(pl.lit(name)).otherwise(category)
     return _with_columns(frame).with_row_index("_order").with_columns(category.alias("category")).filter(
         pl.col("category").is_not_null()
+    )
+
+
+def _supersede(frame: pl.DataFrame, key: str, window_us: int | None) -> pl.DataFrame:
+    """``_superseded``: the time of the next value of the same ``key`` in the same clock-aligned window, if any.
+
+    A value is dropped from a sequence only once that later value is visible (at or before the cutoff), so the
+    latest value per window is kept without ever looking past the cutoff. ``None`` disables downsampling.
+    """
+    if not window_us:
+        return frame.with_columns(pl.lit(None, dtype=pl.Datetime("us")).alias("_superseded"))
+    return (
+        frame.with_columns((pl.col("time").dt.epoch("us") // window_us).alias("_window"))
+        .sort("subject_id", key, "time", "_order")
+        .with_columns(
+            pl.when(pl.col("_window").shift(-1).over("subject_id", key) == pl.col("_window"))
+            .then(pl.col("time").shift(-1).over("subject_id", key)).alias("_superseded")
+        )
     )
 
 
@@ -281,9 +308,19 @@ class _Vocabulary:
         birth_weight = get("birth_weight").filter(pl.col("numeric_value").is_not_null())
         weight_codes = share_kept(birth_weight, 0.0, config.lab_min_bucket_observations)
         whole += sorted(set(numeric_labs) | set(text_labs) | set(bare_labs) | set(weight_codes))
+        # Other (adaptation, not in the papers): every remaining code above a share of the other events, as a whole
+        # code token with a shared value bucket when it has enough numeric values; static codes join the header.
+        others = get("other")
+        other_codes = share_kept(others.filter(pl.col("time").is_not_null()), config.other_min_share)
+        other_static = sorted(others.filter(pl.col("time").is_null())["code"].unique().to_list())
+        other_numeric = others.filter(pl.col("code").is_in(other_codes) & pl.col("numeric_value").is_not_null()
+                                      & pl.col("numeric_value").is_finite())
+        other_bucketed = share_kept(other_numeric, 0.0, config.lab_min_bucket_observations)
+        whole += sorted(set(other_codes) | set(other_static))
         quantiles = {}
         bucketed = pl.concat([numeric.filter(pl.col("code").is_in(numeric_labs)),
-                              birth_weight.filter(pl.col("code").is_in(weight_codes))])
+                              birth_weight.filter(pl.col("code").is_in(weight_codes)),
+                              other_numeric.filter(pl.col("code").is_in(other_bucketed))])
         if bucketed.height:
             stats = bucketed.group_by("code").agg(
                 pl.col("numeric_value").min().alias("min"),
@@ -431,6 +468,17 @@ class _Vocabulary:
         )
         add(labs, pl.concat_list(code, value))
 
+        # Other codes in the vocabulary: code and value bucket, latest value per code in each window (as for vitals).
+        others = timed.filter((pl.col("category") == "other") & pl.col("_code").is_not_null())
+        if others.height:
+            window = int(config.other_window_hours * 3600 * 1_000_000) if config.other_window_hours else None
+            others = _supersede(others.join(cuts, on="code", how="left"), "code", window)
+            parts.append(others.select(
+                "subject_id", "time", pl.lit(3, dtype=pl.Int32).alias("rank"),
+                pl.col("_order").cast(pl.Float64).alias("order"), pl.concat_list(code, value).alias("tokens"),
+                pl.col("_superseded").alias("superseded"),
+            ))
+
         # Gestational age: one token at its time.
         if "BIRTH//GA//22w" in ids:
             weeks = timed.filter((pl.col("category") == "gestational_age") & pl.col("numeric_value").is_not_null())
@@ -457,15 +505,11 @@ class _Vocabulary:
         # Vitals: one binned token; latest value per type in each 6-hour window (Sec. 2.4).
         vitals = _vital_values(timed.lazy()).filter(pl.col("vital").is_in(list(self.vital_codes))).collect()
         if vitals.height:
-            vitals = vitals.with_columns(
+            vitals = _supersede(vitals.with_columns(
                 pl.struct("vital", "value").map_elements(
                     lambda r: ids[f"VITAL//{r['vital']}//{sum(t < r['value'] for t in VITALS[r['vital']][0])}"],
                     return_dtype=pl.Int32).alias("_vital_id"),
-                (pl.col("time").dt.epoch("us") // VITAL_WINDOW_US).alias("_window"),
-            ).sort("subject_id", "vital", "time", "_order").with_columns(
-                pl.when(pl.col("_window").shift(-1).over("subject_id", "vital") == pl.col("_window"))
-                .then(pl.col("time").shift(-1).over("subject_id", "vital")).alias("_superseded")
-            )
+            ), "vital", VITAL_WINDOW_US)
             parts.append(vitals.select(
                 "subject_id", "time", pl.lit(3, dtype=pl.Int32).alias("rank"),
                 pl.col("_order").cast(pl.Float64).alias("order"), pl.concat_list("_vital_id").alias("tokens"),
@@ -503,7 +547,8 @@ class _Vocabulary:
 
         # Subjects: static tokens, race and its first recorded time, birth, right-censoring time.
         subjects = frame.select(pl.col("subject_id").cast(pl.Int64).unique().sort())
-        static = kept.filter(pl.col("time").is_null() & (pl.col("category") != "race")).group_by("subject_id", maintain_order=True).agg(
+        static = kept.filter(pl.col("time").is_null() & (pl.col("category") != "race")
+                             & ((pl.col("category") != "other") | pl.col("_code").is_not_null())).group_by("subject_id", maintain_order=True).agg(
             code.explode(keep_nulls=False, empty_as_null=False).alias("static"))
         births = frame.lazy().filter(pl.col("code") == "MEDS_BIRTH").group_by("subject_id").agg(
             pl.col("time").min().cast(pl.Datetime("us")).alias("birth")).with_columns(pl.col("subject_id").cast(pl.Int64)).collect()

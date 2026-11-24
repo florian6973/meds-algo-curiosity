@@ -65,7 +65,7 @@ TRAIN = _events([
     (1, _hours(6), "HOME_MED//B01AC06"),
     (1, _hours(70), "DIAGNOSIS//ICD//10//E1165"),
     (1, _hours(70), "PROCEDURE//ICD//10//0BH17EZ"),
-    (1, _hours(80), "LAB//220045//bpm", 80.0),  # chartevents other than the vitals: excluded
+    (1, _hours(80), "LAB//220045//bpm", 80.0),  # chartevents other than the vitals: the 'other' category
     (2, None, "GENDER//M"),
     (2, T0 - timedelta(days=2), "MEDS_BIRTH"),
     (2, T0 - timedelta(days=2), "BIRTH//DOCUMENTED"),
@@ -105,8 +105,10 @@ def test_category_file_is_chosen_by_dataset_name_or_explicit_file(tmp_path):
 
     path, source = Curiosity(CuriosityConfig())._category_file(request("MIMIC-IV"))
     assert path == DATASETS_DIR / "MIMIC-IV.yaml" and "dataset_name" in source
-    with pytest.raises(ValueError, match="No Curiosity category file for dataset_name 'eICU'"):
-        Curiosity(CuriosityConfig())._category_file(request("eICU"))
+    # With the 'other' category a dataset needs no file; a paper-only vocabulary does.
+    assert Curiosity(CuriosityConfig())._category_file(request("eICU"))[0] is None
+    with pytest.raises(ValueError, match="No Curiosity category file for dataset_name 'eICU2'"):
+        Curiosity(CuriosityConfig(other_category=False))._category_file(request("eICU2"))
     explicit = Curiosity(CuriosityConfig(additional_predicates_file=DATASETS_DIR / "MIMIC-IV.yaml"))
     resolved = tmp_path / "resolved_feature_predicates.yaml"  # what the runner composes into staging
     composed = dataclasses.replace(request("other"), predicates_file=resolved)
@@ -114,12 +116,14 @@ def test_category_file_is_chosen_by_dataset_name_or_explicit_file(tmp_path):
 
 
 def test_category_file_selects_known_categories_in_paper_order():
-    assert [c for c, _ in category_predicates(MIMIC)] == [c for c in CATEGORIES if f"curiosity_{c}" in MIMIC]
-    assert [c for c, _ in category_predicates(ALL)] == list(CATEGORIES)
+    assert [c for c, _ in category_predicates(MIMIC)] == [c for c in CATEGORIES if f"curiosity_{c}" in MIMIC] + ["other"]
+    assert [c for c, _ in category_predicates(ALL, other=False)] == list(CATEGORIES)
+    # No file: death is the MEDS standard code and every other code is 'other'.
+    assert category_predicates({}) == (("death", {"code": "MEDS_DEATH"}), ("other", None))
     with pytest.raises(ValueError, match="curiosity_procedures"):  # a typo must not silently drop a category
         category_predicates({**MIMIC, "curiosity_procedures": {"code": "X"}})
-    with pytest.raises(ValueError, match="no curiosity_"):
-        category_predicates({"icu_admission": {"code": "X"}})
+    with pytest.raises(ValueError, match="paper-only vocabulary needs"):
+        category_predicates({"icu_admission": {"code": "X"}}, other=False)
     with pytest.raises(ValueError, match="plain predicate"):
         category_predicates({**MIMIC, "curiosity_lab": {"expr": "or(a, b)"}})
 
@@ -176,7 +180,9 @@ def test_tokenizer_emits_every_0826_representation(vocabulary):
                               "ATC//4-5//BE", "ATC//6-//01", "CODE//HOME_MED//B01", "ATC//4-5//AC", "ATC//6-//06",
                               "MED//PATIENT_REPORTED"]
     assert ["CODE//DIAGNOSIS//ICD//10//E11", "ICD//4-5//65"] == first[first.index("CODE//DIAGNOSIS//ICD//10//E11"):][:2]
-    assert "CODE//LAB//220045//bpm" not in first
+    assert "CODE//LAB//220045//bpm" in first  # 'other' (one value: below the bucketing minimum, so no bucket)
+    paper_only = _Vocabulary.fit(TRAIN.lazy(), CONFIG, category_predicates(ALL, other=False), None)
+    assert "CODE//LAB//220045//bpm" not in paper_only.tokens
     # Right-censoring: subject 1 holds the latest training time, so its record ends at the data cutoff (no padding);
     # with a later cutoff, padding covers min(cutoff, last + follow_up_days) in six-month tokens.
     assert not first[-1].startswith("TIME//")
@@ -366,8 +372,12 @@ def test_tasks_needing_ungenerable_codes_are_rejected(vocabulary, tmp_path):
     _check_generable(TaskExtractorConfig.load(TASK_FILE, PREDICATES_FILE), fitted)
     task = tmp_path / "task.yaml"
     task.write_text(TASK_FILE.read_text().replace('regex: "MEDS_DEATH.*"', 'regex: "^LAB//220045//"'))
+    icu = pl.concat([TRAIN, _events([(3, T0, "ICU_ADMISSION//MICU"), (3, T0 + timedelta(days=3), "ICU_DISCHARGE//MICU")])])
+    with_other = _Vocabulary.fit(icu.lazy(), CONFIG, category_predicates(ALL), None)
+    _check_generable(TaskExtractorConfig.load(task, PREDICATES_FILE), with_other)  # an 'other' code: generable
+    paper_only = _Vocabulary.fit(icu.lazy(), CONFIG, category_predicates(ALL, other=False), None)
     with pytest.raises(ValueError, match="cannot generate"):
-        _check_generable(TaskExtractorConfig.load(task, PREDICATES_FILE), vocabulary)
+        _check_generable(TaskExtractorConfig.load(task, PREDICATES_FILE), paper_only)
 
 
 def test_trajectories_cover_every_key_after_its_prediction_time(signal_run):
@@ -464,10 +474,43 @@ def test_mimic_category_file_matches_both_mimic_iv_meds_layouts(version):
     frame = _events([(1, T0, code) for code in codes.values()])
     categorized = dict(_categorized_rows(frame))
     assert categorized == {code: category for category, code in codes.items()}
-    assert "ICU_CHART//220045//bpm" not in dict(_categorized_rows(_events([(1, T0, "ICU_CHART//220045//bpm")])))
+    assert dict(_categorized_rows(_events([(1, T0, "ICU_CHART//220045//bpm"), (1, T0, "MEDS_BIRTH")]))) == {
+        "ICU_CHART//220045//bpm": "other"}  # MEDS_BIRTH only dates the age token
 
 
 def _categorized_rows(frame):
     from curiosity_meds._tokenizer import _categorized
 
     return _categorized(frame.lazy(), category_predicates(MIMIC)).select("code", "category").collect().rows()
+
+
+# ---- the 'other' category ------------------------------------------------------------------------------------------
+def test_other_codes_get_value_buckets_and_are_downsampled_causally():
+    """A mean arterial pressure (not a paper vital) becomes a code and value-bucket token, latest per 6-hour window,
+    and a value is hidden only once the later value of its window is visible."""
+    map_code = "ICU_CHART//220052//mmHg"
+    train = _events([(20, _hours(k), map_code, 60.0 + k) for k in range(0, 60, 7)])
+    fitted = _Vocabulary.fit(train.lazy(), CONFIG, category_predicates(MIMIC), None)
+    assert map_code in fitted.quantiles and f"CODE//{map_code}" in fitted.tokens
+    frame = _events([(21, _hours(1), map_code, 70.0), (21, _hours(3), map_code, 61.0), (21, _hours(30), map_code, 80.0)])
+    keys = pl.DataFrame({"subject_id": [21, 21], "prediction_time": [_hours(2), _hours(4)]},
+                        schema={"subject_id": pl.Int64, "prediction_time": pl.Datetime("us")})
+    events, subjects = fitted.events(frame, None, CONFIG)
+    early, late = (_tokens(fitted, s) for s in fitted.sequences(events, subjects, keys)["tokens"])
+    assert early.count(f"CODE//{map_code}") == 1 and late.count(f"CODE//{map_code}") == 1  # 1 h, then 3 h replaces it
+    assert early[early.index(f"CODE//{map_code}") + 1] != late[late.index(f"CODE//{map_code}") + 1]
+    training = _tokens(fitted, fitted.sequences(events, subjects)["tokens"][0])
+    assert training.count(f"CODE//{map_code}") == 2  # 1 h dropped (same window as 3 h); 30 h kept
+    every = fitted.events(frame, None, dataclasses.replace(CONFIG, other_window_hours=None))
+    assert _tokens(fitted, fitted.sequences(*every)["tokens"][0]).count(f"CODE//{map_code}") == 3
+
+
+def test_a_dataset_without_category_file_runs_with_other_only():
+    train = _events([
+        (30, None, "SEX//F"), (30, T0 - timedelta(days=365.25 * 50), "MEDS_BIRTH"), (30, _hours(0), "ADMIT"),
+        *((30, _hours(k), "HR", 80.0 + k) for k in range(0, 70, 7)), (30, _hours(80), "MEDS_DEATH"),
+    ])
+    fitted = _Vocabulary.fit(train.lazy(), CONFIG, category_predicates({}), None)
+    tokens = _tokens(fitted, _sequences(fitted, train)["tokens"][0])
+    assert tokens[:4] == ["[BOS]", "CODE//SEX//F", "AGE//50y", "YEAR//2150-2154"] and "CODE//ADMIT" in tokens
+    assert tokens[-2:] == ["CODE//MEDS_DEATH", "[EOS]"] and "CODE//MEDS_BIRTH" not in tokens

@@ -5,8 +5,9 @@
 # per category, named curiosity_<category>; an event belongs to the first category (in config.CATEGORIES order) it
 # matches. A category MIMIC-IV does not record is omitted (listed in comments).
 #
-# Not represented: notes and free text; eMAR administrations (the paper does not represent administrations, Sec. 2.6);
-# infusions, outputs, DRG, medication stops; other chartevents than the vitals below; hosp/omr (see vitals).
+# Codes no category below matches (other chartevents, eMAR administrations, infusions, outputs, DRG, medication stops,
+# hosp/omr, ...) are not in the papers' vocabulary: they go to the 'other' category (whole code and value bucket),
+# or are dropped with CuriosityConfig(other_category=False).
 predicates:
   curiosity_sex:
     code: { regex: "^GENDER//" }
