@@ -1,17 +1,26 @@
-"""Curiosity-0826 event tokenization (arXiv 2611.15710 Sec. 2; unchanged parts from 2508.12104v3 Sec. 5.2), fitted on
-the training split only.
+"""Curiosity event tokenization, dataset-agnostic (arXiv 2611.15710 Sec. 2 and 2508.12104v3 Sec. 5.2, adapted: see
+IMPLEMENTATION_REPORT.md), fitted on the training split only.
+
+Every MEDS code is one whole-code token: no event categories and no per-dataset mapping. Optionally, a hierarchy file
+(``hierarchy_file``) splits the codes its rules match into a head token and depth-tagged sub-tokens (e.g. ICD codes
+3/2/2, as in the 0226 paper), so a rare code shares its ancestors' tokens. A code with enough numeric values is followed by one of 30 shared percentile-bucket tokens (the paper's lab buckets); a
+value-less row of a code with text values by a result token; a row carrying the optional ``route``, ``dose`` or
+``frequency`` columns by attribute tokens. Codes below one frequency threshold become ``[UNK]``, as in the paper;
+rarer result and attribute values become ``RESULT//[OTHER]`` or are dropped. Only MEDS standard codes are special:
+``MEDS_BIRTH`` dates the age token and ``MEDS_DEATH`` is placed at the end of its date and closes the record with
+``[EOS]``.
 
 Preprocessing stores *events*, not sequences: one row per event with its token ids, plus per-subject demographics.
-:func:`sequences` turns them into token sequences at a cutoff. Without a cutoff it gives the training sequence; with
-the prediction time ``T`` it gives the prompt, which depends only on what is recorded at or before ``T``:
+:func:`_Vocabulary.sequences` turns them into token sequences at a cutoff. Without a cutoff it gives the training
+sequence; with the prediction time ``T`` it gives the prompt, which depends only on what is recorded at or before T:
 
-``[BOS] [sex/static] [race] [age at start] [year at start]`` then the visible events in time order, with ETHOS time
+``[BOS] [static codes] [race] [age at start] [year at start]`` then the visible events in time order, with ETHOS time
 tokens before each new timestamp, then (training only) ``[EOS]`` after a death or six-month padding tokens up to the
 right-censoring time; a prompt instead ends with the time tokens of the elapsed gap to ``T``.
 
 Everything that could depend on the future is evaluated at the cutoff: the start of the timeline (age and year
-tokens), race (the first race recorded by then), and vital downsampling (a vital is dropped only once the later value
-of its 6-hour window is itself visible). Padding never enters a prompt.
+tokens), race (the first race recorded by then), and the downsampling of numeric codes (a value is dropped only once
+the later value of its window is itself visible). Padding never enters a prompt.
 """
 
 from __future__ import annotations
@@ -19,22 +28,19 @@ from __future__ import annotations
 import json
 import math
 import re
-from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from statistics import NormalDist
-from typing import Any
 
 import numpy as np
 import polars as pl
-from aces.config import PlainPredicateConfig
+import yaml
 
-from .config import CATEGORIES, CuriosityConfig
+from .config import CuriosityConfig
 
 PAD, BOS, EOS, UNK = "[PAD]", "[BOS]", "[EOS]", "[UNK]"
-END_CAUSE_OF_DEATH = "DEATH//END_PRELIMINARY_CAUSE"
-REPORTED_FLAG = "MED//PATIENT_REPORTED"
+BIRTH_CODE, DEATH_CODE = "MEDS_BIRTH", "MEDS_DEATH"
 _MINUTE, _DAY = 60.0, 86400.0
 # ETHOS buckets (ethos-paper special_tokens.py, 30-day months) with the 0226 paper's extra "1-5 minutes" bucket;
 # unchanged in 0826.
@@ -54,35 +60,14 @@ TIME_BUCKETS = (
     ("3mt-6mt", 90 * _DAY, 180 * _DAY),
 )
 SIX_MONTHS = 180 * _DAY
-NEVER = datetime(9999, 12, 31)  # time of padding tokens: after every cutoff, so no prompt contains them
 
-# Lab value buckets (Sec. 2.3.4): two 0.1% tails and 28 interior buckets whose edges are equal-width in z between the
-# 0.1st and 99.9th percentiles, converted to percentile levels shared by every lab.
+# Value buckets (0826 Sec. 2.3.4): two 0.1% tails and 28 interior buckets whose edges are equal-width in z between the
+# 0.1st and 99.9th percentiles, converted to percentile levels shared by every code.
 _Z = NormalDist().inv_cdf(0.001)
 LAB_LEVELS = tuple(NormalDist().cdf(_Z + i * (-2 * _Z) / 28) for i in range(29))
 LAB_BUCKETS = len(LAB_LEVELS) + 1  # 30
-
-# Vital bins (Table 2): thresholds, left-edge exclusive, with a catch-all below the first and above the last.
-# Plausibility bounds (Sec. 2.4) remove values outside (0, upper].
-VITALS = {
-    "SBP": ((0, *range(80, 141, 10), 160, 180, 200, 370), 370.0),
-    "DBP": ((0, *range(50, 121, 10), 360), 360.0),
-    "HEIGHT": ((0, 10, *range(15, 101, 5), 108), 108.0),
-    "WEIGHT": ((*range(0, 51), *range(52, 101, 2), *range(103, 161, 3), *range(165, 261, 5), *range(270, 301, 10),
-                *range(320, 481, 20)), 1400.0),
-    "BMI": ((0, 18, *range(19, 41), 204), 204.0),
-}
-# category -> (vital, factor to the paper's unit)
-VITAL_CATEGORIES = {
-    "vital_sbp_mmhg": ("SBP", 1.0), "vital_dbp_mmhg": ("DBP", 1.0), "vital_height_in": ("HEIGHT", 1.0),
-    "vital_height_cm": ("HEIGHT", 1 / 2.54), "vital_weight_lb": ("WEIGHT", 1.0),
-    "vital_weight_kg": ("WEIGHT", 2.20462262185), "vital_bmi": ("BMI", 1.0),
-}
-VITAL_WINDOW_US = 6 * 3600 * 1_000_000  # latest value per vital type in each 6-hour window
-MEDICATION_ATTRIBUTES = ("route", "dose", "frequency")  # optional MEDS columns -> Route_Form, Dose, Frequency tokens
-_ATC = re.compile(r"^[A-Z]\d\d[A-Z]{2}\d{2}$")
-_RANK = {"birth": 0, "gestational_age": 1, "birth_weight": 2}  # birth tokens lead their instant (Sec. 2.1)
-_EVENT_COLUMNS = ["subject_id", "time", "code", "numeric_value", "text_value", *MEDICATION_ATTRIBUTES]
+ATTRIBUTES = ("route", "dose", "frequency")  # optional MEDS columns -> attribute tokens (0826 Sec. 2.6)
+_EVENT_COLUMNS = ["subject_id", "time", "code", "numeric_value", "text_value", *ATTRIBUTES]
 
 
 def _time_token(name: str) -> str:
@@ -107,7 +92,7 @@ def _token_seconds(name: str) -> float:
 
 
 def age_token(days: float) -> str:
-    """Age at the start of the timeline (Sec. 2.1): days in week 1, weeks to 4 weeks, 4-week steps to 1 year,
+    """Age at the start of the timeline (0826 Sec. 2.1): days in week 1, weeks to 4 weeks, 4-week steps to 1 year,
     6-month steps to 5 years, then years (up to 120)."""
     days = max(days, 0.0)
     if days < 7:
@@ -130,49 +115,63 @@ def year_token(year: int) -> str:
     return f"YEAR//{low}-{low + 4}"
 
 
-def gestational_age_token(weeks: float) -> str:
-    """Completed weeks with edge buckets (Sec. 2.1)."""
-    if weeks < 22:
-        return "BIRTH//GA//lt22w"
-    if weeks > 44:
-        return "BIRTH//GA//gt44w"
-    return f"BIRTH//GA//{int(weeks)}w"
+EXAMPLE_HIERARCHIES = Path(__file__).parent / "hierarchies"  # shipped example hierarchy files
 
 
-GESTATIONAL_TOKENS = ("BIRTH//GA//lt22w", *(f"BIRTH//GA//{w}w" for w in range(22, 45)), "BIRTH//GA//gt44w")
+def load_hierarchy(path: Path | str) -> tuple[dict, ...]:
+    """Validated hierarchy rules from a YAML file: ``hierarchy: [{code: {regex: ...}, separator: ...}, ...]``.
+
+    Each rule's regex is matched at the start of a code; the matched prefix stays in the head token and the rest of
+    the code is split, either on ``separator`` or into parts of the given character ``widths`` (any remainder is a
+    last part). The first matching rule applies; codes no rule matches stay whole.
+    """
+    data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    rules = data.get("hierarchy") if isinstance(data, dict) else None
+    if not isinstance(rules, list) or not rules:
+        raise ValueError(f"{path} must define a non-empty 'hierarchy' list")
+    out = []
+    for i, rule in enumerate(rules):
+        if not isinstance(rule, dict) or set(rule) - {"code", "separator", "widths"}:
+            raise ValueError(f"{path}: rule {i} may only have code, separator and widths")
+        regex = rule.get("code", {}).get("regex") if isinstance(rule.get("code"), dict) else None
+        if not isinstance(regex, str) or not regex:
+            raise ValueError(f"{path}: rule {i} needs code: {{regex: ...}}")
+        re.compile(regex)
+        separator, widths = rule.get("separator"), rule.get("widths")
+        if (separator is None) == (widths is None):
+            raise ValueError(f"{path}: rule {i} needs exactly one of separator and widths")
+        if separator is not None and (not isinstance(separator, str) or not separator):
+            raise ValueError(f"{path}: rule {i} separator must be a non-empty string")
+        if widths is not None and (not isinstance(widths, list) or not widths
+                                   or not all(isinstance(w, int) and w > 0 for w in widths)):
+            raise ValueError(f"{path}: rule {i} widths must be a non-empty list of positive integers")
+        out.append({"regex": regex, "separator": separator, "widths": widths})
+    return tuple(out)
 
 
-def _split(code: str, atc: bool) -> tuple[str, str, str]:
-    """``<prefix>//E1165`` -> ``<prefix>//E11``, ``65``, ``""`` (ICD 3/2/2; ATC 3/2/rest)."""
-    prefix, _, value = code.rpartition("//")
-    return f"{prefix}//{value[:3]}", value[3:5], value[5:] if atc else value[5:7]
-
-
-def _sub_token(kind: str, position: int, part: str) -> str:
-    return f"{kind}//{'4-5' if position == 1 else '6-'}//{part}"
-
-
-def category_predicates(predicates: Mapping[str, Any]) -> tuple[tuple[str, dict], ...]:
-    """``(category, ACES plain-predicate spec)`` in matching order from a dataset category file. A category the dataset
-    does not record is omitted (core rejects empty predicates); an unknown ``curiosity_*`` name is an error, so a typo
-    cannot silently drop a category."""
-    known = {f"curiosity_{c}" for c in CATEGORIES}
-    unknown = sorted(name for name in predicates if name.startswith("curiosity_") and name not in known)
-    if unknown:
-        raise ValueError(f"Unknown Curiosity categories {unknown}; expected names among {sorted(known)}")
-    if not known & predicates.keys():
-        raise ValueError("The dataset category file defines no curiosity_* category")
-    selected = []
-    for category in CATEGORIES:
-        spec = predicates.get(f"curiosity_{category}")
-        if spec is None:
+def split_code(code: str, rules: tuple[dict, ...]) -> tuple[str, tuple[str, ...], str] | None:
+    """``(head, sub-parts, joiner)`` for the first rule matching ``code`` with something after its prefix, or None.
+    ``head + joiner.join(...)`` of the parts gives back the code exactly."""
+    for rule in rules:
+        match = re.match(rule["regex"], code)
+        if match is None or match.end() >= len(code):
             continue
-        spec = dict(spec)
-        if "code" not in spec or "expr" in spec or spec.get("other_cols"):
-            raise ValueError(f"curiosity_{category} must be an ACES plain predicate on code/numeric_value")
-        PlainPredicateConfig(**spec).MEDS_eval_expr()  # rejects malformed code fields early
-        selected.append((category, spec))
-    return tuple(selected)
+        prefix, rest = code[: match.end()], code[match.end():]
+        if rule["separator"] is not None:
+            parts, joiner = rest.split(rule["separator"]), rule["separator"]
+        else:
+            parts, start = [], 0
+            for width in rule["widths"]:
+                parts.append(rest[start: start + width])
+                start += width
+            parts = [part for part in [*parts, rest[start:]] if part]
+            joiner = ""
+        return prefix + parts[0], tuple(parts[1:]), joiner
+    return None
+
+
+def _sub_token(depth: int, part: str) -> str:
+    return f"SUB//{depth}//{part}"
 
 
 def _with_columns(frame: pl.LazyFrame) -> pl.LazyFrame:
@@ -181,45 +180,40 @@ def _with_columns(frame: pl.LazyFrame) -> pl.LazyFrame:
     return frame.with_columns(missing).select(
         pl.col("subject_id").cast(pl.Int64), pl.col("time").cast(pl.Datetime("us")), pl.col("code").cast(pl.String),
         pl.col("numeric_value").cast(pl.Float64), pl.col("text_value").cast(pl.String),
-        *(pl.col(c).cast(pl.String) for c in MEDICATION_ATTRIBUTES),
-    )
+        *(pl.col(c).cast(pl.String) for c in ATTRIBUTES),
+    ).with_row_index("_order")
 
 
-def _categorized(frame: pl.LazyFrame, categories: tuple[tuple[str, dict], ...]) -> pl.LazyFrame:
-    category = pl.lit(None, dtype=pl.String)
-    for name, spec in reversed(categories):
-        category = pl.when(PlainPredicateConfig(**spec).MEDS_eval_expr()).then(pl.lit(name)).otherwise(category)
-    return _with_columns(frame).with_row_index("_order").with_columns(category.alias("category")).filter(
-        pl.col("category").is_not_null()
-    )
+def _numeric() -> pl.Expr:
+    return pl.col("numeric_value").is_not_null() & pl.col("numeric_value").is_finite()
 
 
-def _vital_values(frame: pl.LazyFrame) -> pl.LazyFrame:
-    """Vital rows in the paper's units: numeric_value, else a number in text_value; a ``S/D`` text blood pressure
-    (MIMIC-IV OMR before MIMIC-IV-MEDS 0.2) is not split here and is dropped. Implausible values are removed."""
-    factor = pl.col("category").replace_strict({c: f for c, (_, f) in VITAL_CATEGORIES.items()}, default=None,
-                                               return_dtype=pl.Float64)
-    vital = pl.col("category").replace_strict({c: v for c, (v, _) in VITAL_CATEGORIES.items()}, default=None,
-                                              return_dtype=pl.String)
-    upper = vital.replace_strict({v: u for v, (_, u) in VITALS.items()}, default=None, return_dtype=pl.Float64)
-    value = pl.coalesce(pl.col("numeric_value"), pl.col("text_value").str.strip_chars().cast(pl.Float64, strict=False))
+def _supersede(frame: pl.DataFrame, key: str, window_us: int | None) -> pl.DataFrame:
+    """``_superseded``: the time of the next value of the same ``key`` in the same clock-aligned window, if any.
+
+    A value is dropped from a sequence only once that later value is visible (at or before the cutoff), so the
+    latest value per window is kept without ever looking past the cutoff. ``None`` disables downsampling.
+    """
+    if not window_us:
+        return frame.with_columns(pl.lit(None, dtype=pl.Datetime("us")).alias("_superseded"))
     return (
-        frame.filter(pl.col("category").is_in(list(VITAL_CATEGORIES)))
-        .with_columns(vital.alias("vital"), (value * factor).alias("value"))
-        .filter((pl.col("value") > 0) & (pl.col("value") <= upper))
+        frame.with_columns((pl.col("time").dt.epoch("us") // window_us).alias("_window"))
+        .sort("subject_id", key, "time", "_order")
+        .with_columns(
+            pl.when(pl.col("_window").shift(-1).over("subject_id", key) == pl.col("_window"))
+            .then(pl.col("time").shift(-1).over("subject_id", key)).alias("_superseded")
+        )
     )
 
 
-def _races(kept: pl.DataFrame, column: pl.DataFrame | None) -> pl.DataFrame:
-    """First recorded race per subject and its time (null for a static record): from ``race`` category events
-    (``RACE//<value>`` codes, MIMIC-IV-MEDS >= 0.2) and from a race column (MIMIC-IV-MEDS 0.1.0 admission rows)."""
+def _races(column: pl.DataFrame | None) -> pl.DataFrame:
+    """First recorded race per subject and its time (null for a static record), from an optional race column
+    (MIMIC-IV-MEDS 0.1.0 admission rows). Race recorded as codes (``RACE//<race>``) is an ordinary event."""
     schema = {"subject_id": pl.Int64, "race": pl.String, "time": pl.Datetime("us")}
-    rows = [kept.filter(pl.col("category") == "race").select(
-        "subject_id", pl.col("code").str.strip_prefix("RACE//").alias("race"), "time")]
-    if column is not None and column.height:
-        rows.append(column.select(pl.col("subject_id").cast(pl.Int64), pl.col("race").cast(pl.String),
-                                  pl.col("time").cast(pl.Datetime("us"))))
-    frame = pl.concat([r.cast(schema) for r in rows]).filter(pl.col("race").is_not_null())
+    if column is None or not column.height:
+        return pl.DataFrame(schema=schema)
+    frame = column.select(pl.col("subject_id").cast(pl.Int64), pl.col("race").cast(pl.String),
+                          pl.col("time").cast(pl.Datetime("us"))).filter(pl.col("race").is_not_null())
     return frame.sort("subject_id", "time", "race", nulls_last=False).group_by("subject_id", maintain_order=True).first()
 
 
@@ -227,135 +221,101 @@ def _races(kept: pl.DataFrame, column: pl.DataFrame | None) -> pl.DataFrame:
 class _Vocabulary:
     """Fitted tokenizer state (training split only)."""
 
-    categories: tuple[tuple[str, dict], ...]
     tokens: tuple[str, ...]
-    quantiles: dict[str, tuple[float, ...]]  # code -> (min, q(levels)..., max): lab and birth-weight buckets
-    text_labs: tuple[str, ...]  # lab codes whose text results get result tokens
-    split_codes: dict[str, str]  # training code -> "ICD" | "ATC" split into sub-tokens
-    vital_codes: dict[str, tuple[str, float]]  # vital -> (MEDS code generated for it, factor to the paper unit)
-    gestational_code: str | None
+    quantiles: dict[str, tuple[float, ...]]  # code -> (min, q(levels)..., max): value buckets
+    text_codes: tuple[str, ...]  # codes whose value-less rows get result tokens
     cutoff: str  # latest training time (ISO): right-censoring bound
+    hierarchy: tuple[dict, ...] = ()  # rules of the hierarchy file (frozen here, so later steps need no file)
+    joiners: dict[str, str] | None = None  # head token text -> joiner of its sub-parts (decoding)
+    split_codes: tuple[str, ...] = ()  # training codes split into parts that are all in the vocabulary
 
     # ---- fitting -----------------------------------------------------------------------------------------------
     @classmethod
-    def fit(cls, train: pl.LazyFrame, config: CuriosityConfig, categories: tuple[tuple[str, dict], ...],
-            race: pl.LazyFrame | None) -> _Vocabulary:
-        kept = _categorized(train, categories).collect()
-        timed = kept.filter(pl.col("time").is_not_null())
+    def fit(cls, train: pl.LazyFrame, config: CuriosityConfig, race: pl.LazyFrame | None,
+            hierarchy: tuple[dict, ...] = ()) -> _Vocabulary:
+        rows = _with_columns(train).filter(pl.col("code") != BIRTH_CODE).collect()
+        timed = rows.filter(pl.col("time").is_not_null())
+        floor = max(config.min_code_count, config.min_code_share * timed.height)
 
-        def counts(frame: pl.DataFrame) -> list[tuple[str, int]]:
-            ranked = frame.group_by("code").agg(pl.len().alias("n")).sort(["n", "code"], descending=[True, False])
-            return list(ranked.iter_rows())
+        def kept(values: pl.Series) -> list[str]:
+            """Values seen at least ``floor`` times (one threshold for codes, result and attribute values)."""
+            counts = values.drop_nulls().value_counts()
+            return sorted(counts.filter(pl.col("count") >= floor)[values.name].to_list())
 
-        def share_kept(frame: pl.DataFrame, share: float, minimum: int = 1) -> list[str]:
-            total = frame.height
-            return sorted(code for code, n in counts(frame) if n >= minimum and n >= share * total)
-
-        by = {name: kept.filter(pl.col("category") == name) for name, _ in categories}
-        empty = kept.clear()
-        get = lambda name: by.get(name, empty)  # noqa: E731
-        whole, split_codes = [], {}
-        for name in ("sex", "birth", "death", "cause_of_death", "encounter"):
-            whole += sorted(get(name)["code"].unique().to_list())
-        for code in sorted(get("diagnosis")["code"].unique().to_list()):
-            split_codes[code] = "ICD"
-        for name in ("medication", "reported_medication"):
-            for code in sorted(get(name)["code"].unique().to_list()):
-                if _ATC.match(code.rpartition("//")[2]):
-                    split_codes[code] = "ATC"
-                else:
-                    whole.append(code)
-        whole += share_kept(get("procedure"), config.procedure_min_share)
-
-        # Labs (Sec. 2.3): numeric labs bucketed per code; non-numeric labs with result tokens; value-less rows
-        # (collection markers emitted by the ETL, e.g. MIMIC-IV-MEDS LAB//SPECIMEN_COLLECTED) as plain components.
-        labs = get("lab")
-        numeric = labs.filter(pl.col("numeric_value").is_not_null() & pl.col("numeric_value").is_finite())
-        text = labs.filter(pl.col("numeric_value").is_null() & pl.col("text_value").is_not_null())
-        bare = labs.filter(pl.col("numeric_value").is_null() & pl.col("text_value").is_null())
-        numeric_labs = share_kept(numeric, config.lab_numeric_min_share, config.lab_min_bucket_observations)
-        text_labs = share_kept(text, config.lab_text_min_share)
-        bare_labs = share_kept(bare, config.lab_numeric_min_share)
-        text_values = share_kept(text.filter(pl.col("code").is_in(text_labs)).select(pl.col("text_value").alias("code")),
-                                 config.lab_text_value_min_share)
-        birth_weight = get("birth_weight").filter(pl.col("numeric_value").is_not_null())
-        weight_codes = share_kept(birth_weight, 0.0, config.lab_min_bucket_observations)
-        whole += sorted(set(numeric_labs) | set(text_labs) | set(bare_labs) | set(weight_codes))
+        # Whole codes, or (hierarchy) heads and depth-tagged sub-parts, each kept by the same threshold.
+        code_counts = dict(rows["code"].value_counts().iter_rows())
+        splits = {code: split_code(code, hierarchy) for code in code_counts} if hierarchy else {}
+        whole, heads, subs, joiners = {}, {}, {}, {}
+        for code, n in code_counts.items():
+            split = splits.get(code)
+            if split is None:
+                whole[code] = n
+                continue
+            head, parts, joiner = split
+            heads[head] = heads.get(head, 0) + n
+            joiners[head] = joiner
+            for depth, part in enumerate(parts, 1):
+                subs[(depth, part)] = subs.get((depth, part), 0) + n
+        codes = sorted(code for code, n in whole.items() if n >= floor)
+        kept_heads = sorted(head for head, n in heads.items() if n >= floor)
+        kept_subs = sorted(key for key, n in subs.items() if n >= floor)
+        known_heads, known_subs = set(kept_heads), set(kept_subs)
+        split_known = [code for code, split in splits.items() if split is not None and split[0] in known_heads]
+        split_codes = sorted(code for code in split_known
+                             if all((depth, part) in known_subs for depth, part in enumerate(splits[code][1], 1)))
+        in_vocabulary = rows.filter(pl.col("code").is_in([*codes, *split_known]))
+        numeric = in_vocabulary.filter(_numeric())
+        bucketed = numeric.group_by("code").len().filter(pl.col("len") >= config.min_bucket_observations)["code"]
+        text = in_vocabulary.filter(pl.col("numeric_value").is_null() & pl.col("text_value").is_not_null())
+        text_codes = kept(text["code"])
+        results = kept(text.filter(pl.col("code").is_in(text_codes))["text_value"])
+        attributes = [f"ATTR//{c.upper()}//{v}" for c in ATTRIBUTES for v in kept(in_vocabulary[c])]
         quantiles = {}
-        bucketed = pl.concat([numeric.filter(pl.col("code").is_in(numeric_labs)),
-                              birth_weight.filter(pl.col("code").is_in(weight_codes))])
-        if bucketed.height:
-            stats = bucketed.group_by("code").agg(
+        if len(bucketed):
+            stats = numeric.filter(pl.col("code").is_in(bucketed.implode())).group_by("code").agg(
                 pl.col("numeric_value").min().alias("min"),
                 *(pl.col("numeric_value").quantile(level, "linear").alias(f"q{i}") for i, level in enumerate(LAB_LEVELS)),
                 pl.col("numeric_value").max().alias("max"),
             )
             columns = ["min", *(f"q{i}" for i in range(len(LAB_LEVELS))), "max"]
             quantiles = {row["code"]: tuple(float(row[c]) for c in columns) for row in stats.iter_rows(named=True)}
-
-        # Medication attributes (Sec. 2.6): values below the floor are null (no token).
-        meds = pl.concat([get("medication"), get("reported_medication")])
-        attributes = []
-        for column in MEDICATION_ATTRIBUTES:
-            values = meds.filter(pl.col(column).is_not_null()).select(pl.col(column).alias("code"))
-            attributes += [f"MED//{column.upper()}//{v}" for v in share_kept(values, config.medication_attribute_min_share)]
-
-        # Vitals: the most frequent training code of each vital is the one generated futures use.
-        vital_codes = {}
-        vitals = _vital_values(kept.lazy()).collect()
-        for vital in VITALS:
-            ranked = counts(vitals.filter(pl.col("vital") == vital))
-            if ranked:
-                category = vitals.filter(pl.col("code") == ranked[0][0])["category"][0]
-                vital_codes[vital] = (ranked[0][0], VITAL_CATEGORIES[category][1])
-        gestational = counts(get("gestational_age"))
-
-        heads, subs = set(), set()
-        for code, kind in split_codes.items():
-            head, *parts = _split(code, kind == "ATC")
-            heads.add(head)
-            subs.update(_sub_token(kind, position, part) for position, part in enumerate(parts, 1) if part)
-        races = sorted(_races(kept, race.collect() if race is not None else None)["race"].unique().to_list())
+        races = sorted(_races(race.collect() if race is not None else None)["race"].unique().to_list())
         starts = timed.group_by("subject_id").agg(pl.col("time").min())["time"].dt.year()
         years = sorted({year_token(y) for y in range(int(starts.min()), int(starts.max()) + 1)}) if len(starts) else []
         tokens = (
-            PAD, BOS, EOS, UNK, END_CAUSE_OF_DEATH, REPORTED_FLAG,
+            PAD, BOS, EOS, UNK,
             *(_time_token(name) for name, _, _ in TIME_BUCKETS), _time_token("6mt"),
             *AGE_TOKENS, *years, *(f"RACE//{value}" for value in races),
             *(f"LABQ//{i}" for i in range(1, LAB_BUCKETS + 1)),
-            *(f"RESULT//{v}" for v in text_values), "RESULT//[OTHER]", "RESULT//[MISSING]",
-            *(f"VITAL//{vital}//{i}" for vital, (edges, _) in VITALS.items() if vital in vital_codes
-              for i in range(len(edges) + 1)),
-            *(GESTATIONAL_TOKENS if gestational else ()),
+            *(f"RESULT//{v}" for v in results), "RESULT//[OTHER]", "RESULT//[MISSING]",
             *attributes,
-            *(f"CODE//{code}" for code in sorted(set(whole))),
-            *(f"CODE//{head}" for head in sorted(heads - {f"{c}" for c in whole})),
-            *sorted(subs),
+            *(f"CODE//{code}" for code in codes),
+            *(f"CODE//{head}" for head in kept_heads),
+            *(_sub_token(depth, part) for depth, part in kept_subs),
         )
         cutoff = timed["time"].max()
-        return cls(categories, tuple(dict.fromkeys(tokens)), quantiles, tuple(text_labs), split_codes, vital_codes,
-                   gestational[0][0] if gestational else None, (cutoff or datetime(1970, 1, 1)).isoformat())
+        return cls(tuple(dict.fromkeys(tokens)), quantiles, tuple(text_codes),
+                   (cutoff or datetime(1970, 1, 1)).isoformat(), tuple(hierarchy),
+                   {head: joiners[head] for head in kept_heads}, tuple(split_codes))
 
     # ---- persistence ---------------------------------------------------------------------------------------------
     def save(self, path: Path) -> None:
         path.write_text(json.dumps({
-            "categories": [[name, spec] for name, spec in self.categories],
             "tokens": list(self.tokens),
             "quantiles": {code: list(edges) for code, edges in self.quantiles.items()},
-            "text_labs": list(self.text_labs),
-            "split_codes": self.split_codes,
-            "vital_codes": {k: list(v) for k, v in self.vital_codes.items()},
-            "gestational_code": self.gestational_code,
+            "text_codes": list(self.text_codes),
             "cutoff": self.cutoff,
+            "hierarchy": list(self.hierarchy),
+            "joiners": self.joiners or {},
+            "split_codes": list(self.split_codes),
         }, sort_keys=True))
 
     @classmethod
     def load(cls, path: Path) -> _Vocabulary:
         v = json.loads(path.read_text())
-        return cls(tuple((name, spec) for name, spec in v["categories"]), tuple(v["tokens"]),
-                   {code: tuple(edges) for code, edges in v["quantiles"].items()}, tuple(v["text_labs"]),
-                   v["split_codes"], {k: tuple(x) for k, x in v["vital_codes"].items()}, v["gestational_code"],
-                   v["cutoff"])
+        return cls(tuple(v["tokens"]), {code: tuple(edges) for code, edges in v["quantiles"].items()},
+                   tuple(v["text_codes"]), v["cutoff"], tuple(v.get("hierarchy", ())), v.get("joiners") or {},
+                   tuple(v.get("split_codes", ())))
 
     # ---- lookups -------------------------------------------------------------------------------------------------
     @property
@@ -363,65 +323,63 @@ class _Vocabulary:
         return {token: index for index, token in enumerate(self.tokens)}
 
     def codes(self) -> set[str]:
-        """Every MEDS code the tokenizer fitted (a token, a split, bucket statistics or a generated vital code)."""
-        heads = {_split(code, kind == "ATC")[0] for code, kind in self.split_codes.items()}
-        whole = {t[6:] for t in self.tokens if t.startswith("CODE//")} - (heads - set(self.split_codes))
-        return whole | set(self.split_codes) | set(self.quantiles) | {c for c, _ in self.vital_codes.values()} | (
-            {self.gestational_code} if self.gestational_code else set())
+        """Every MEDS code the vocabulary can generate: whole-code and head tokens, and the training codes whose
+        hierarchy parts are all in the vocabulary."""
+        return {token[6:] for token in self.tokens if token.startswith("CODE//")} | set(self.split_codes)
 
-    def _code_tokens(self) -> dict[str, list[int]]:
-        ids = self.ids
-        mapping = {token[6:]: [index] for token, index in ids.items() if token.startswith("CODE//")}
-        for code, kind in self.split_codes.items():
-            head, *parts = _split(code, kind == "ATC")
-            mapping[code] = [ids[f"CODE//{head}"]] + [
-                ids[_sub_token(kind, position, part)] for position, part in enumerate(parts, 1) if part
-            ]
-        return mapping
+    def _code_tokens(self, codes: list[str]) -> dict[str, list[int]]:
+        """Token ids of each code: a whole-code token; or a head token and its sub-tokens up to the first rare part
+        (the code is then represented by its known ancestor); ``[UNK]`` for a rare code or head."""
+        ids, out = self.ids, {}
+        for code in codes:
+            split = split_code(code, self.hierarchy) if self.hierarchy else None
+            if split is None:
+                out[code] = [ids.get(f"CODE//{code}", ids[UNK])]
+                continue
+            head, parts, _ = split
+            if f"CODE//{head}" not in ids:
+                out[code] = [ids[UNK]]
+                continue
+            tokens = [ids[f"CODE//{head}"]]
+            for depth, part in enumerate(parts, 1):
+                if _sub_token(depth, part) not in ids:
+                    break
+                tokens.append(ids[_sub_token(depth, part)])
+            out[code] = tokens
+        return out
 
     # ---- events --------------------------------------------------------------------------------------------------
     def events(self, frame: pl.DataFrame, race: pl.DataFrame | None, config: CuriosityConfig) -> tuple[pl.DataFrame, pl.DataFrame]:
         """``(events, subjects)`` for one shard.
 
-        ``events``: ``subject_id, time, rank, order, tokens, superseded`` (one row per event; ``superseded`` is the
-        time of the later vital of the same 6-hour window, which hides this one once visible).
+        ``events``: ``subject_id, time, order, tokens, superseded`` (one row per event; ``superseded`` is the time of
+        the later value of the same numeric code in the same window, which hides this one once visible).
         ``subjects``: ``subject_id, static, race, race_time, birth, censor`` (``censor`` is null after a death).
         """
         ids = self.ids
-        code_tokens = self._code_tokens()
-        unk = ids[UNK]
-        kept = _categorized(frame.lazy(), self.categories).collect()
-        code_map = pl.DataFrame({"code": list(code_tokens), "_code": list(code_tokens.values())},
+        rows = _with_columns(frame.lazy()).collect()
+        mapping = self._code_tokens(rows["code"].unique().drop_nulls().to_list())
+        code_ids = pl.DataFrame({"code": list(mapping), "_code": list(mapping.values())},
                                 schema={"code": pl.String, "_code": pl.List(pl.Int32)})
-        kept = kept.join(code_map, on="code", how="left")
-        code = pl.col("_code").fill_null(pl.lit([unk], dtype=pl.List(pl.Int32)))
-        timed = kept.filter(pl.col("time").is_not_null())
-        parts = []
+        rows = rows.join(code_ids, on="code", how="left").with_columns(
+            pl.col("_code").fill_null(pl.lit([ids[UNK]], dtype=pl.List(pl.Int32))))
+        code = pl.col("_code")
+        timed = rows.filter(pl.col("time").is_not_null() & ~pl.col("code").is_in([BIRTH_CODE, DEATH_CODE]))
 
-        def add(rows: pl.DataFrame, tokens: pl.Expr) -> None:
-            parts.append(rows.select(
-                "subject_id", "time", pl.col("category").replace_strict(_RANK, default=3, return_dtype=pl.Int32).alias("rank"),
-                pl.col("_order").cast(pl.Float64).alias("order"), tokens.alias("tokens"),
-                pl.lit(None, dtype=pl.Datetime("us")).alias("superseded"),
-            ))
-
-        add(timed.filter(pl.col("category").is_in(["birth", "encounter", "diagnosis", "procedure"])), code)
-
-        # Labs and birth weight: component, then a bucket, a result token, or nothing (collection marker).
+        # Value token: a percentile bucket, a result token (value-less rows of text codes), or nothing.
         q = len(LAB_LEVELS)
         cuts = pl.DataFrame(
             {"code": list(self.quantiles), **{f"q{i}": [edges[i + 1] for edges in self.quantiles.values()] for i in range(q)}},
             schema={"code": pl.String, **{f"q{i}": pl.Float64 for i in range(q)}},
         )
         results = {t[8:]: i for t, i in ids.items() if t.startswith("RESULT//")}
-        labs = timed.filter(pl.col("category").is_in(["lab", "birth_weight"])).join(cuts, on="code", how="left")
         bucket = 1 + pl.sum_horizontal([(pl.col("numeric_value") > pl.col(f"q{i}")).cast(pl.Int32) for i in range(q)])
         value = (
-            pl.when(pl.col("q0").is_not_null() & pl.col("numeric_value").is_not_null())
+            pl.when(pl.col("q0").is_not_null() & _numeric())
             .then(pl.concat_list(bucket.replace_strict(range(1, LAB_BUCKETS + 1),
                                                        [ids[f"LABQ//{i}"] for i in range(1, LAB_BUCKETS + 1)],
                                                        return_dtype=pl.Int32)))
-            .when(pl.col("code").is_in(list(self.text_labs)) & pl.col("numeric_value").is_null())
+            .when(pl.col("code").is_in(list(self.text_codes)) & pl.col("numeric_value").is_null())
             .then(pl.concat_list(
                 pl.when(pl.col("text_value").is_null()).then(pl.lit(results["[MISSING]"], dtype=pl.Int32))
                 .otherwise(pl.col("text_value").replace_strict(
@@ -429,84 +387,48 @@ class _Vocabulary:
             ))
             .otherwise(pl.lit([], dtype=pl.List(pl.Int32)))
         )
-        add(labs, pl.concat_list(code, value))
-
-        # Gestational age: one token at its time.
-        if "BIRTH//GA//22w" in ids:
-            weeks = timed.filter((pl.col("category") == "gestational_age") & pl.col("numeric_value").is_not_null())
-            add(weeks, pl.concat_list(pl.col("numeric_value").map_elements(
-                lambda w: ids[gestational_age_token(w)], return_dtype=pl.Int32)))
-
-        # Medications: code (ATC 3/2/rest), attribute tokens; a flag after each block of reported medications.
         attributes = [
-            pl.col(column).map_elements(lambda v, c=column: ids.get(f"MED//{c.upper()}//{v}"), return_dtype=pl.Int32)
-            for column in MEDICATION_ATTRIBUTES
+            pl.col(column).replace_strict(
+                [t.split("//", 2)[2] for t in self.tokens if t.startswith(f"ATTR//{column.upper()}//")],
+                [ids[t] for t in self.tokens if t.startswith(f"ATTR//{column.upper()}//")],
+                default=None, return_dtype=pl.Int32)
+            for column in ATTRIBUTES
         ]
-        meds = timed.filter(pl.col("category").is_in(["medication", "reported_medication"]))
-        add(meds, pl.concat_list(code, *attributes).list.drop_nulls())
-        reported = meds.filter(pl.col("category") == "reported_medication")
-        if reported.height:
-            flags = reported.group_by("subject_id", "time").agg(pl.col("_order").max())
-            parts.append(flags.select(
-                "subject_id", "time", pl.lit(3, dtype=pl.Int32).alias("rank"),
-                (pl.col("_order").cast(pl.Float64) + 0.5).alias("order"),
-                pl.lit([ids[REPORTED_FLAG]], dtype=pl.List(pl.Int32)).alias("tokens"),
-                pl.lit(None, dtype=pl.Datetime("us")).alias("superseded"),
-            ))
+        window = int(config.downsample_hours * 3600 * 1_000_000) if config.downsample_hours else None
+        timed = timed.join(cuts, on="code", how="left")
+        # Downsampling (0826 Sec. 2.4, applied to every numeric code): latest value per code in each window.
+        numeric = _supersede(timed.filter(_numeric()), "code", window)
+        others = timed.filter(~_numeric()).with_columns(pl.lit(None, dtype=pl.Datetime("us")).alias("_superseded"))
+        columns = ["subject_id", "time", pl.col("_order").cast(pl.Float64).alias("order"),
+                   pl.concat_list(code, value, *attributes).list.drop_nulls().alias("tokens"),
+                   pl.col("_superseded").alias("superseded")]
+        parts = [numeric.select(columns), others.select(columns)]
 
-        # Vitals: one binned token; latest value per type in each 6-hour window (Sec. 2.4).
-        vitals = _vital_values(timed.lazy()).filter(pl.col("vital").is_in(list(self.vital_codes))).collect()
-        if vitals.height:
-            vitals = vitals.with_columns(
-                pl.struct("vital", "value").map_elements(
-                    lambda r: ids[f"VITAL//{r['vital']}//{sum(t < r['value'] for t in VITALS[r['vital']][0])}"],
-                    return_dtype=pl.Int32).alias("_vital_id"),
-                (pl.col("time").dt.epoch("us") // VITAL_WINDOW_US).alias("_window"),
-            ).sort("subject_id", "vital", "time", "_order").with_columns(
-                pl.when(pl.col("_window").shift(-1).over("subject_id", "vital") == pl.col("_window"))
-                .then(pl.col("time").shift(-1).over("subject_id", "vital")).alias("_superseded")
-            )
-            parts.append(vitals.select(
-                "subject_id", "time", pl.lit(3, dtype=pl.Int32).alias("rank"),
-                pl.col("_order").cast(pl.Float64).alias("order"), pl.concat_list("_vital_id").alias("tokens"),
-                pl.col("_superseded").alias("superseded"),
-            ))
-
-        # Death (Sec. 2.2.2): at the last instant of the recorded date, followed by the preliminary causes of death,
-        # their closing token and EOS. Later events are dropped; a record without death is right-censored.
-        deaths = timed.filter(pl.col("category") == "death").group_by("subject_id").agg(
+        # Death (0826 Sec. 2.2.2): MEDS_DEATH at the last instant of its date, then EOS; later events are dropped and a
+        # record without death is right-censored.
+        deaths = rows.filter((pl.col("code") == DEATH_CODE) & pl.col("time").is_not_null()).group_by("subject_id").agg(
             pl.col("time").min().dt.date().cast(pl.Datetime("us")).add(pl.duration(days=1, microseconds=-1)).alias("death"),
-            pl.col("_code").sort_by("time").first().fill_null(pl.lit([unk], dtype=pl.List(pl.Int32))).alias("_death_code"),
+            pl.col("_code").first(),
         )
-        causes = kept.filter(pl.col("category") == "cause_of_death").group_by("subject_id", maintain_order=True).agg(
-            code.explode(keep_nulls=False, empty_as_null=False).alias("_causes"))
-        death_rows = deaths.join(causes, on="subject_id", how="left").with_columns(
-            pl.concat_list(
-                "_death_code",
-                pl.when(pl.col("_causes").is_not_null())
-                .then(pl.concat_list("_causes", pl.lit([ids[END_CAUSE_OF_DEATH]], dtype=pl.List(pl.Int32))))
-                .otherwise(pl.lit([], dtype=pl.List(pl.Int32))),
-                pl.lit([ids[EOS]], dtype=pl.List(pl.Int32)),
-            ).alias("tokens")
-        )
-        parts.append(death_rows.select(
-            "subject_id", pl.col("death").alias("time"), pl.lit(9, dtype=pl.Int32).alias("rank"),
-            pl.lit(0.0).alias("order"), "tokens", pl.lit(None, dtype=pl.Datetime("us")).alias("superseded"),
+        parts.append(deaths.select(
+            "subject_id", pl.col("death").alias("time"), pl.lit(float("inf")).alias("order"),
+            pl.concat_list("_code", pl.lit(ids[EOS], dtype=pl.Int32)).alias("tokens"),
+            pl.lit(None, dtype=pl.Datetime("us")).alias("superseded"),
         ))
         events = (
             pl.concat(parts)
             .join(deaths.select("subject_id", "death"), on="subject_id", how="left")
             .filter(pl.col("death").is_null() | (pl.col("time") <= pl.col("death")))
             .drop("death")
-            .sort("subject_id", "time", "rank", "order")
+            .sort("subject_id", "time", "order")
         )
 
-        # Subjects: static tokens, race and its first recorded time, birth, right-censoring time.
-        subjects = frame.select(pl.col("subject_id").cast(pl.Int64).unique().sort())
-        static = kept.filter(pl.col("time").is_null() & (pl.col("category") != "race")).group_by("subject_id", maintain_order=True).agg(
-            code.explode(keep_nulls=False, empty_as_null=False).alias("static"))
-        births = frame.lazy().filter(pl.col("code") == "MEDS_BIRTH").group_by("subject_id").agg(
-            pl.col("time").min().cast(pl.Datetime("us")).alias("birth")).with_columns(pl.col("subject_id").cast(pl.Int64)).collect()
+        # Subjects: static codes, race and its first recorded time, birth, right-censoring time.
+        subjects = rows.select("subject_id").unique().sort("subject_id")
+        static = rows.filter(pl.col("time").is_null() & (pl.col("code") != BIRTH_CODE)).group_by(
+            "subject_id", maintain_order=True).agg(code.explode(keep_nulls=False, empty_as_null=False).alias("static"))
+        births = rows.filter((pl.col("code") == BIRTH_CODE) & pl.col("time").is_not_null()).group_by("subject_id").agg(
+            pl.col("time").min().alias("birth"))
         last = events.group_by("subject_id").agg(pl.col("time").max().alias("last"))
         cutoff = datetime.fromisoformat(self.cutoff)
         subjects = (
@@ -521,7 +443,7 @@ class _Vocabulary:
             )
         )
         race_ids = {t[6:]: i for t, i in ids.items() if t.startswith("RACE//")}
-        subjects = subjects.join(_races(kept, race).select(
+        subjects = subjects.join(_races(race).select(
             "subject_id",
             pl.col("race").replace_strict(race_ids, default=None, return_dtype=pl.Int32),
             pl.col("time").alias("race_time"),
@@ -530,7 +452,7 @@ class _Vocabulary:
 
     # ---- sequences -----------------------------------------------------------------------------------------------
     def sequences(self, events: pl.DataFrame, subjects: pl.DataFrame, cutoffs: pl.DataFrame | None = None) -> pl.DataFrame:
-        """Token sequences. Without ``cutoffs``: one training sequence per subject (all events, superseded vitals
+        """Token sequences. Without ``cutoffs``: one training sequence per subject (all events, superseded values
         dropped, then EOS or padding). With ``cutoffs`` (``subject_id, prediction_time``): one prompt per row, built
         only from what is recorded at or before ``prediction_time`` and ending with the elapsed-gap time tokens."""
         ids = self.ids
@@ -546,7 +468,7 @@ class _Vocabulary:
                 pl.when(cut.is_null()).then(pl.col("superseded").is_null())
                 .otherwise((pl.col("time") <= cut) & (pl.col("superseded").is_null() | (pl.col("superseded") > cut)))
             )
-            .sort("_key", "time", "rank", "order")
+            .sort("_key", "time", "order")
         )
         bucket_ids = [ids[_time_token(name)] for name, _, _ in TIME_BUCKETS]
         six = ids[_time_token("6mt")]
@@ -567,8 +489,8 @@ class _Vocabulary:
         body = (
             visible.with_columns(pl.concat_list(gap_expr(gap), "tokens").alias("_tokens"))
             .group_by("_key", maintain_order=True)
-            .agg(pl.col("_tokens").explode(keep_nulls=False, empty_as_null=False).alias("_body"), pl.col("time").min().alias("_start"),
-                 pl.col("time").max().alias("_last"))
+            .agg(pl.col("_tokens").explode(keep_nulls=False, empty_as_null=False).alias("_body"),
+                 pl.col("time").min().alias("_start"), pl.col("time").max().alias("_last"))
         )
         out = keys.join(subjects, on="subject_id", how="left").join(body, on="_key", how="left")
         start = pl.coalesce("_start", cut)
@@ -612,22 +534,20 @@ class _Vocabulary:
 
         The clock starts at the prediction time (the prompt ends with the real elapsed gap); generated events sharing
         it are placed one microsecond later. A bucket token draws its value uniformly within the bucket (0226 App. G).
-        Attribute, flag and closing tokens carry no event; BOS or EOS ends the record.
+        Attribute tokens carry no event; BOS or EOS ends the record.
         """
-        splits = {}
-        for code, kind in self.split_codes.items():
-            head, *_ = _split(code, kind == "ATC")
-            splits[head] = kind
         clock, events, invalid = prediction_time, [], 0
         future = prediction_time + timedelta(microseconds=1)
-        code = value = text = None
-        split_kind, split_length = None, None
+        joiners = self.joiners or {}
+        code = value = text = joiner = None
+        depth = 0
 
         def flush():
-            nonlocal code, value, text, split_kind, split_length
+            nonlocal code, value, text, joiner, depth
             if code is not None:
                 events.append((max(clock, future), code, value, text))
-            code = value = text = split_kind = split_length = None
+            code = value = text = joiner = None
+            depth = 0
 
         for position, index in enumerate(tokens):
             token = self.tokens[index]
@@ -640,14 +560,11 @@ class _Vocabulary:
                 clock += timedelta(seconds=_token_seconds(token))
             elif kind == "CODE":
                 flush()
-                code = rest
-                split_kind = splits.get(code)
-                split_length = 3 if split_kind else None
-            elif kind in ("ICD", "ATC"):
-                where, _, part = rest.partition("//")
-                expected = 3 if where == "4-5" else 5
-                if split_kind == kind and split_length == expected:
-                    code, split_length = code + part, split_length + len(part)
+                code, joiner = rest, joiners.get(rest)
+            elif kind == "SUB":
+                level, _, part = rest.partition("//")
+                if joiner is not None and value is None and text is None and int(level) == depth + 1:
+                    code, depth = code + joiner + part, depth + 1
                 else:
                     invalid += 1
             elif kind == "LABQ":
@@ -657,27 +574,13 @@ class _Vocabulary:
                 else:
                     invalid += 1
             elif kind == "RESULT":
-                if code is not None and code in self.text_labs and text is None:
+                if code is not None and code in self.text_codes and text is None:
                     text = None if rest in ("[OTHER]", "[MISSING]") else rest
                 else:
                     invalid += 1
-            elif kind == "VITAL":
-                flush()
-                vital, _, bin_ = rest.partition("//")
-                edges, upper = VITALS[vital]
-                b = int(bin_)
-                low = edges[b - 1] if b > 0 else 0.0
-                high = edges[b] if b < len(edges) else upper
-                vital_code, factor = self.vital_codes[vital]
-                events.append((max(clock, future), vital_code, float(low + uniforms[position] * (high - low)) / factor, None))
-            elif kind == "BIRTH" and token in GESTATIONAL_TOKENS:
-                flush()
-                weeks = {"lt22w": 21.5, "gt44w": 44.5}.get(rest[4:], None)
-                weeks = weeks if weeks is not None else int(rest[4:-1]) + 0.5
-                events.append((max(clock, future), self.gestational_code, weeks, None))
-            elif kind == "MED" or token == END_CAUSE_OF_DEATH:
-                continue  # attributes and flags qualify the preceding medication; the closing token has no event
-            else:  # PAD, UNK, demographic tokens
+            elif kind == "ATTR":
+                continue  # attributes qualify the preceding code
+            else:  # PAD, UNK, demographic tokens: no event
                 flush()
                 invalid += token != UNK
         flush()

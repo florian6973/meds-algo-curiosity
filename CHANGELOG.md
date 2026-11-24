@@ -1,6 +1,22 @@
 # Changes
 
-## 0.1.0 (unreleased)
+## 0.1.1 (unreleased)
+
+- Dataset-agnostic tokenization (a documented adaptation of the papers): every MEDS code is one whole-code token, with
+  no event categories, category files or ICD/ATC hierarchy split. A code with at least `min_bucket_observations`
+  numeric values gets the 30 shared value-bucket tokens; codes with text values get result tokens; the optional
+  `route`, `dose`, `frequency` columns give attribute tokens on any row. One frequency threshold
+  (`min_code_count`, `min_code_share`) for every code: rarer codes become `[UNK]`. The latest value of each numeric
+  code in each 6-hour window is kept (`downsample_hours`). `MEDS_BIRTH` and `MEDS_DEATH` remain special.
+- Optional `hierarchy_file`: YAML rules (a code regex, then a `separator` or character `widths`) split matching codes
+  after the matched prefix into a head token and depth-tagged sub-tokens, so rare codes share their ancestors' tokens.
+  Example shipped: `curiosity_meds/hierarchies/MIMIC-IV.yaml` (ICD diagnoses 3/2/2).
+- Predictions include `predicted_boolean_value` (probability ≥ 0.5) next to the probability: MEDS-DEV's evaluation
+  (meds-evaluation) requires it, so 0.1.0 predictions could not be evaluated there.
+- Any MEDS dataset runs without per-dataset configuration, and any task whose codes occur in training can be
+  answered (e.g. MEDS-DEV's hypotension task on mean arterial pressure).
+
+## 0.1.0 (2026-11-24)
 
 - Curiosity-0826 (arXiv 2611.15710) as a `zero_shot_materialized` MEDS algorithm, replacing the earlier
   Curiosity-0226 port: BOS-first sequences, age/year at start of timeline with pediatric buckets, birth,

@@ -1,5 +1,5 @@
-"""Curiosity-specific behavior: 0826 tokenization, internal temporal cutoffs, configuration effects, sampling and
-Eq. 2 aggregation."""
+"""Curiosity-specific behavior: dataset-agnostic 0826 tokenization, internal temporal cutoffs, configuration effects,
+sampling and Eq. 2 aggregation."""
 
 import dataclasses
 import json
@@ -7,36 +7,27 @@ import random
 import subprocess
 import sys
 from datetime import datetime, timedelta
+from statistics import NormalDist
 
 import numpy as np
 import polars as pl
 import pytest
 import torch
-import yaml
 from aces.config import TaskExtractorConfig
 from meds_algorithm.conformance.temporal import perturb_future
-from meds_algorithm.requests import PreprocessDataRequest
 
 from curiosity_meds import Curiosity, CuriosityConfig
 from curiosity_meds import _model
-from curiosity_meds._tokenizer import (
-    LAB_BUCKETS, LAB_LEVELS, SIX_MONTHS, VITALS, _token_seconds, _Vocabulary, age_token, category_predicates,
-    gap_tokens,
-)
-from curiosity_meds.config import CATEGORIES
-from curiosity_meds.curiosity_meds import DATASETS_DIR, _aggregate, _check_generable
+from curiosity_meds._tokenizer import LAB_BUCKETS, LAB_LEVELS, SIX_MONTHS, _token_seconds, _Vocabulary, age_token, gap_tokens
+from curiosity_meds.curiosity_meds import _aggregate, _check_generable
 
 from .e2e import PREDICATES_FILE, TASK, TASK_FILE, TEST_CONFIG, build_fixture
 
 T0 = datetime(2150, 1, 1, 8)
-MIMIC = yaml.safe_load((DATASETS_DIR / "MIMIC-IV.yaml").read_text())["predicates"]
-# Every category, for tokenizer tests: MIMIC-IV's predicates plus the categories MIMIC-IV does not record.
-ALL = {**MIMIC, "curiosity_birth": {"code": "BIRTH//DOCUMENTED"}, "curiosity_gestational_age": {"code": "BIRTH//GA"},
-       "curiosity_birth_weight": {"code": "BIRTH//WEIGHT//g"}, "curiosity_cause_of_death": {"code": {"regex": "^COD//"}},
-       "curiosity_vital_bmi": {"code": "BMI"}, "curiosity_reported_medication": {"code": {"regex": "^HOME_MED//"}}}
-CONFIG = CuriosityConfig(lab_min_bucket_observations=5, follow_up_days=365.0)
+CONFIG = CuriosityConfig(min_code_count=1, min_code_share=0.0, min_bucket_observations=5, follow_up_days=365.0)
 SCHEMA = {"subject_id": pl.Int64, "time": pl.Datetime("us"), "code": pl.String, "numeric_value": pl.Float32,
           "text_value": pl.String, "route": pl.String, "race": pl.String}
+LAB, TEXT_LAB, MED, DX = "LAB//RESULT//50912//mg/dL", "LAB//RESULT//51463//UNK", "MEDICATION//START//Heparin", "DIAGNOSIS//ICD//10//E1165"
 
 
 def _events(rows):
@@ -48,83 +39,49 @@ def _hours(h):
     return T0 + timedelta(hours=h)
 
 
+def _keys(subject, *times):
+    return pl.DataFrame({"subject_id": [subject] * len(times), "prediction_time": list(times)},
+                        schema={"subject_id": pl.Int64, "prediction_time": pl.Datetime("us")})
+
+
 TRAIN = _events([
     (1, None, "GENDER//F"),
     (1, T0 - timedelta(days=365.25 * 62), "MEDS_BIRTH"),
     (1, _hours(0), "HOSPITAL_ADMISSION//EW EMER.//EMERGENCY ROOM", None, None, None, "WHITE"),
-    *((1, _hours(k), "LAB//SPECIMEN_COLLECTED//50912//STAT") for k in range(10)),
-    *((1, _hours(k + 1), "LAB//RESULT//50912//mg/dL", float(k)) for k in range(10)),
-    *((1, _hours(k + 1), "LAB//RESULT//51463//UNK", None, value) for k, value in enumerate(["Neg", "Pos", "Neg"])),
-    (1, _hours(2), "LAB//RESULT//51463//UNK"),  # text lab without a result -> missing-value token
-    (1, _hours(3), "LAB//220179//mmHg", 120.0),
-    (1, _hours(4), "LAB//226730//cm", 170.0),
-    (1, _hours(5), "LAB//226512//kg", 70.0),
-    (1, _hours(5), "BMI", 24.2),
-    (1, _hours(6), "MEDICATION//START//Heparin", None, None, "IV"),
-    (1, _hours(6), "MEDICATION//START//N02BE01"),  # an ATC-coded medication
-    (1, _hours(6), "HOME_MED//B01AC06"),
-    (1, _hours(70), "DIAGNOSIS//ICD//10//E1165"),
-    (1, _hours(70), "PROCEDURE//ICD//10//0BH17EZ"),
-    (1, _hours(80), "LAB//220045//bpm", 80.0),  # chartevents other than the vitals: excluded
+    (1, _hours(0), "LAB//SPECIMEN_COLLECTED//50912//STAT"),  # a value-less code: just its token
+    *((1, _hours(7 * k + 1), LAB, float(k)) for k in range(10)),  # 7 h apart: never in one 6-hour window
+    *((1, _hours(k + 1), TEXT_LAB, None, value) for k, value in enumerate(["Neg", "Pos", "Neg", "Weird", "Pos", "Neg"])),
+    (1, _hours(2), TEXT_LAB),  # a text code without a result -> missing-value token
+    (1, _hours(6), MED, None, None, "IV"), (1, _hours(30), MED, None, None, "IV"), (1, _hours(31), MED, None, None, "PO"),
+    (1, _hours(70), DX), (1, _hours(75), DX), (1, _hours(76), "DIAGNOSIS//ICD//10//Z999"),
     (2, None, "GENDER//M"),
     (2, T0 - timedelta(days=2), "MEDS_BIRTH"),
-    (2, T0 - timedelta(days=2), "BIRTH//DOCUMENTED"),
-    (2, T0 - timedelta(days=2), "BIRTH//WEIGHT//g", 3300.0),
-    (2, T0 - timedelta(days=2), "BIRTH//GA", 39.4),
-    *((2, T0 - timedelta(days=2, minutes=-k), "BIRTH//WEIGHT//g", 3000.0 + k) for k in range(1, 6)),
+    (2, _hours(0), "HOSPITAL_ADMISSION//EW EMER.//EMERGENCY ROOM"),
     (2, _hours(1), "MEDS_DEATH"),
-    (2, _hours(1), "COD//I469"),
     (2, _hours(30), "HOSPITAL_DISCHARGE//DIED"),  # after the death date: dropped
 ])
 
 
+def _race(frame):
+    return frame.filter(pl.col("race").is_not_null()).sort("subject_id", "time").group_by("subject_id").agg(
+        pl.col("race").first(), pl.col("time").first())
+
+
 @pytest.fixture(scope="module")
 def vocabulary():
-    return _Vocabulary.fit(TRAIN.lazy(), CONFIG, category_predicates(ALL), TRAIN.lazy().select("subject_id", "race",
-                                                                                                "time"))
+    return _Vocabulary.fit(TRAIN.lazy(), CONFIG, _race(TRAIN).lazy())
 
 
 def _tokens(vocabulary, sequence):
     return [vocabulary.tokens[i] for i in sequence]
 
 
-def _sequences(vocabulary, frame, keys=None):
-    race = frame.filter(pl.col("race").is_not_null()).sort("subject_id", "time").group_by("subject_id").agg(
-        pl.col("race").first(), pl.col("time").first())
-    events, subjects = vocabulary.events(frame, race, CONFIG)
+def _sequences(vocabulary, frame, keys=None, config=CONFIG):
+    events, subjects = vocabulary.events(frame, _race(frame), config)
     return vocabulary.sequences(events, subjects, keys)
 
 
-# ---- configuration and category files ------------------------------------------------------------------------------
-def test_category_file_is_chosen_by_dataset_name_or_explicit_file(tmp_path):
-    def request(name):
-        (tmp_path / name / "metadata").mkdir(parents=True)
-        (tmp_path / name / "metadata" / "dataset.json").write_text(json.dumps({"dataset_name": name}))
-        return PreprocessDataRequest.from_arguments({"external_meds_dir": str(tmp_path / name),
-                                                     "output_data_dir": str(tmp_path / "out")})
-
-    path, source = Curiosity(CuriosityConfig())._category_file(request("MIMIC-IV"))
-    assert path == DATASETS_DIR / "MIMIC-IV.yaml" and "dataset_name" in source
-    with pytest.raises(ValueError, match="No Curiosity category file for dataset_name 'eICU'"):
-        Curiosity(CuriosityConfig())._category_file(request("eICU"))
-    explicit = Curiosity(CuriosityConfig(additional_predicates_file=DATASETS_DIR / "MIMIC-IV.yaml"))
-    resolved = tmp_path / "resolved_feature_predicates.yaml"  # what the runner composes into staging
-    composed = dataclasses.replace(request("other"), predicates_file=resolved)
-    assert explicit._category_file(composed) == (resolved, "additional_predicates_file")
-
-
-def test_category_file_selects_known_categories_in_paper_order():
-    assert [c for c, _ in category_predicates(MIMIC)] == [c for c in CATEGORIES if f"curiosity_{c}" in MIMIC]
-    assert [c for c, _ in category_predicates(ALL)] == list(CATEGORIES)
-    with pytest.raises(ValueError, match="curiosity_procedures"):  # a typo must not silently drop a category
-        category_predicates({**MIMIC, "curiosity_procedures": {"code": "X"}})
-    with pytest.raises(ValueError, match="no curiosity_"):
-        category_predicates({"icu_admission": {"code": "X"}})
-    with pytest.raises(ValueError, match="plain predicate"):
-        category_predicates({**MIMIC, "curiosity_lab": {"expr": "or(a, b)"}})
-
-
-# ---- 0826 tokens ---------------------------------------------------------------------------------------------------
+# ---- time, age and value tokens ------------------------------------------------------------------------------------
 @pytest.mark.parametrize(("seconds", "expected"), [
     (59, []), (60, ["TIME//1m-5m"]), (300, ["TIME//5m-15m"]), (86400, ["TIME//1d-3d"]),
     (SIX_MONTHS - 1, ["TIME//3mt-6mt"]), (SIX_MONTHS, ["TIME//6mt"]), (400 * 86400, ["TIME//6mt"] * 2),
@@ -147,101 +104,92 @@ def test_age_buckets_are_finer_for_children(days, token):
     assert age_token(days) == token
 
 
-def test_lab_buckets_are_thirty_shared_percentile_levels(vocabulary):
+def test_value_buckets_are_thirty_shared_percentile_levels(vocabulary):
     assert LAB_BUCKETS == 30 and LAB_LEVELS[0] == pytest.approx(0.001) and LAB_LEVELS[-1] == pytest.approx(0.999)
-    from statistics import NormalDist
-
     widths = np.diff([NormalDist().inv_cdf(level) for level in LAB_LEVELS])
     assert np.allclose(widths, widths[0]) and len(widths) == 28
-    edges = vocabulary.quantiles["LAB//RESULT//50912//mg/dL"]
+    edges = vocabulary.quantiles[LAB]
     assert len(edges) == 31 and edges[0] == 0 and edges[-1] == 9
 
 
-def test_tokenizer_emits_every_0826_representation(vocabulary):
-    sequences = _sequences(vocabulary, TRAIN)
-    first, second = (_tokens(vocabulary, s) for s in sequences["tokens"])
+# ---- dataset-agnostic tokenization ---------------------------------------------------------------------------------
+def test_every_code_is_one_whole_token_with_its_value_tokens(vocabulary):
+    first, second = (_tokens(vocabulary, s) for s in _sequences(vocabulary, TRAIN)["tokens"])
     assert first[:5] == ["[BOS]", "CODE//GENDER//F", "RACE//WHITE", "AGE//62y", "YEAR//2150-2154"]
-    # Lab collection markers come from the ETL's own rows; results carry a shared bucket or a result token.
-    assert first[5:9] == ["CODE//HOSPITAL_ADMISSION//EW EMER.//EMERGENCY ROOM",
-                          "CODE//LAB//SPECIMEN_COLLECTED//50912//STAT", "TIME//1h-2h",
-                          "CODE//LAB//SPECIMEN_COLLECTED//50912//STAT"]
-    assert first[9:14] == ["CODE//LAB//RESULT//50912//mg/dL", "LABQ//1", "CODE//LAB//RESULT//51463//UNK",
-                           "RESULT//Neg", "TIME//1h-2h"]
-    assert ["CODE//LAB//RESULT//51463//UNK", "RESULT//[MISSING]"] == first[first.index("RESULT//[MISSING]") - 1:][:2]
-    # Vitals: one binned token each in the paper's units (170 cm = 66.9 in; 70 kg = 154.3 lb).
-    assert {"VITAL//SBP//5", "VITAL//HEIGHT//13", "VITAL//WEIGHT//94", "VITAL//BMI//8"} <= set(first)
-    # Medications: route token; ATC split 3/2/rest; patient-reported block closed by its flag.
-    i = first.index("CODE//MEDICATION//START//Heparin")
-    assert first[i:i + 9] == ["CODE//MEDICATION//START//Heparin", "MED//ROUTE//IV", "CODE//MEDICATION//START//N02",
-                              "ATC//4-5//BE", "ATC//6-//01", "CODE//HOME_MED//B01", "ATC//4-5//AC", "ATC//6-//06",
-                              "MED//PATIENT_REPORTED"]
-    assert ["CODE//DIAGNOSIS//ICD//10//E11", "ICD//4-5//65"] == first[first.index("CODE//DIAGNOSIS//ICD//10//E11"):][:2]
-    assert "CODE//LAB//220045//bpm" not in first
-    # Right-censoring: subject 1 holds the latest training time, so its record ends at the data cutoff (no padding);
-    # with a later cutoff, padding covers min(cutoff, last + follow_up_days) in six-month tokens.
-    assert not first[-1].startswith("TIME//")
-    later = dataclasses.replace(vocabulary, cutoff=(T0 + timedelta(days=900)).isoformat())
-    padded = _tokens(later, _sequences(later, TRAIN.filter(pl.col("subject_id") == 1))["tokens"][0])
-    assert padded[:-2] == first and padded[-2:] == ["TIME//6mt", "TIME//6mt"]  # 365 days -> round(365 / 180) = 2
-    # Birth: event at the birth instant, gestational age and birth weight after it; death at the end of its date,
-    # causes, closing token and EOS; nothing after the death date.
-    assert second[:7] == ["[BOS]", "CODE//GENDER//M", "AGE//0d", "YEAR//2145-2149", "CODE//BIRTH//DOCUMENTED",
-                          "BIRTH//GA//39w", "CODE//BIRTH//WEIGHT//g"] and second[7].startswith("LABQ//")
-    assert second[-4:] == ["CODE//MEDS_DEATH", "CODE//COD//I469", "DEATH//END_PRELIMINARY_CAUSE", "[EOS]"]
-    assert "CODE//HOSPITAL_DISCHARGE//DIED" not in second
-    race = TRAIN.filter(pl.col("race").is_not_null()).group_by("subject_id").agg(pl.col("race").first(),
-                                                                               pl.col("time").first())
-    events, _ = vocabulary.events(TRAIN, race, CONFIG)
-    death = events.filter(pl.col("tokens").list.last() == vocabulary.ids["[EOS]"])["time"].to_list()
-    assert death == [datetime(2150, 1, 1, 23, 59, 59, 999999)]  # last instant of the recorded death date
+    assert first[5:7] == ["CODE//HOSPITAL_ADMISSION//EW EMER.//EMERGENCY ROOM", "CODE//LAB//SPECIMEN_COLLECTED//50912//STAT"]
+    i = first.index(f"CODE//{LAB}")
+    assert first[i + 1].startswith("LABQ//")  # a numeric code: its value bucket
+    assert [first[j + 1] for j, t in enumerate(first) if t == f"CODE//{TEXT_LAB}"][:3] == [
+        "RESULT//Neg", "RESULT//Pos", "RESULT//[MISSING]"]  # 1 h Neg; at 2 h Pos then no result (row order)
+    assert first[first.index(f"CODE//{MED}") + 1] == "ATTR//ROUTE//IV"  # the optional route column
+    assert f"CODE//{DX}" in first and not any(t.startswith(("ICD//", "ATC//")) for t in first)  # no hierarchy split
+    # Death at the last instant of its date, then EOS; nothing after it.
+    assert second[-2:] == ["CODE//MEDS_DEATH", "[EOS]"] and "CODE//HOSPITAL_DISCHARGE//DIED" not in second
+    events, _ = vocabulary.events(TRAIN, _race(TRAIN), CONFIG)
+    assert events.filter(pl.col("tokens").list.last() == vocabulary.ids["[EOS]"])["time"].to_list() == [
+        datetime(2150, 1, 1, 23, 59, 59, 999999)]
 
 
-def test_vital_bins_are_left_exclusive_and_implausible_values_dropped(vocabulary):
-    # Hours 0 and 7 lie in different 6-hour windows, so both are kept.
-    frame = _events([(5, _hours(0), "LAB//220179//mmHg", 80.0), (5, _hours(7), "LAB//220179//mmHg", 80.5),
-                     (5, _hours(13), "LAB//220179//mmHg", 371.0), (5, _hours(19), "LAB//220180//mmHg", 0.0)])
-    tokens = _tokens(vocabulary, _sequences(vocabulary, frame)["tokens"][0])
-    assert [t for t in tokens if t.startswith("VITAL//")] == ["VITAL//SBP//1", "VITAL//SBP//2"]
-    assert len(VITALS["WEIGHT"][0]) + 1 == 130 and len(VITALS["SBP"][0]) + 1 == 13
+def test_rare_codes_become_unk_and_rare_values_other():
+    rare = dataclasses.replace(CONFIG, min_code_count=2)
+    fitted = _Vocabulary.fit(TRAIN.lazy(), rare, _race(TRAIN).lazy())
+    first = _tokens(fitted, _sequences(fitted, TRAIN, config=rare)["tokens"][0])
+    assert first[1] == "[UNK]"  # GENDER//F occurs once in train: rare, an unknown header token (as in the paper)
+    # Codes seen once: GENDER//F, the collection marker and Z999.
+    assert "CODE//DIAGNOSIS//ICD//10//Z999" not in fitted.tokens and first.count("[UNK]") == 3
+    assert "RESULT//Weird" not in fitted.tokens and "RESULT//[OTHER]" in first  # a rare result value
+    assert "ATTR//ROUTE//PO" not in fitted.tokens  # a rare attribute value: no token
+    floor = dataclasses.replace(CONFIG, min_code_count=1, min_code_share=0.5)
+    assert len(_Vocabulary.fit(TRAIN.lazy(), floor, None).codes()) <= 1  # the share threshold applies too
+
+
+def test_numeric_codes_are_downsampled_causally():
+    """The latest value per numeric code in each 6-hour window; a value is hidden only once the later value of its
+    window is visible, so prompts never depend on the future."""
+    frame = _events([(21, _hours(k), "HR", 60.0 + k) for k in range(0, 60, 7)]
+                    + [(22, _hours(1), "HR", 70.0), (22, _hours(3), "HR", 61.0), (22, _hours(30), "HR", 80.0)])
+    fitted = _Vocabulary.fit(frame.lazy(), CONFIG, None)
+    assert "HR" in fitted.quantiles
+    early, late = (_tokens(fitted, s) for s in _sequences(fitted, frame, _keys(22, _hours(2), _hours(4)))["tokens"])
+    assert early.count("CODE//HR") == 1 and late.count("CODE//HR") == 1  # 1 h, then 3 h replaces it
+    assert early[early.index("CODE//HR") + 1] != late[late.index("CODE//HR") + 1]
+    training = _tokens(fitted, _sequences(fitted, frame.filter(pl.col("subject_id") == 22))["tokens"][0])
+    assert training.count("CODE//HR") == 2  # 1 h dropped (same window as 3 h); 30 h kept
+    every = dataclasses.replace(CONFIG, downsample_hours=None)
+    assert _tokens(fitted, _sequences(fitted, frame.filter(pl.col("subject_id") == 22), config=every)["tokens"][0]).count(
+        "CODE//HR") == 3
 
 
 def test_decode_roundtrips_codes_values_and_stops_at_eos(vocabulary):
     ids = vocabulary.ids
-    names = ["TIME//1h-2h", "CODE//DIAGNOSIS//ICD//10//E11", "ICD//4-5//65", "CODE//LAB//RESULT//50912//mg/dL",
-             "LABQ//15", "CODE//LAB//RESULT//51463//UNK", "RESULT//Pos", "VITAL//WEIGHT//94",
-             "CODE//MEDICATION//START//N02", "ATC//4-5//BE", "ATC//6-//01", "MED//ROUTE//IV", "BIRTH//GA//39w",
-             "CODE//MEDS_DEATH", "[EOS]", "CODE//GENDER//F"]
+    names = ["TIME//1h-2h", f"CODE//{DX}", f"CODE//{LAB}", "LABQ//15", f"CODE//{TEXT_LAB}", "RESULT//Pos",
+             f"CODE//{MED}", "ATTR//ROUTE//IV", "CODE//MEDS_DEATH", "[EOS]", "CODE//GENDER//F"]
     events, clock, invalid = vocabulary.decode([ids[n] for n in names], T0, np.full(len(names), 0.5))
-    assert [e[1] for e in events] == ["DIAGNOSIS//ICD//10//E1165", "LAB//RESULT//50912//mg/dL", "LAB//RESULT//51463//UNK",
-                                      "LAB//226512//kg", "MEDICATION//START//N02BE01", "BIRTH//GA", "MEDS_DEATH"]
-    assert 4.0 <= events[1][2] <= 5.0 and events[2][3] == "Pos" and events[5][2] == 39.5
-    assert 69.8 < events[3][2] < 70.8  # lb bin decoded back to the generated code's kg
-    assert invalid == 0 and all(e[0] > T0 for e in events)
-    orphan = [ids["ICD//4-5//65"], ids["LABQ//1"], ids["RESULT//Neg"]]
-    assert vocabulary.decode(orphan, T0, np.zeros(3))[2] == 3
+    assert [e[1] for e in events] == [DX, LAB, TEXT_LAB, MED, "MEDS_DEATH"]
+    assert 0 <= events[1][2] <= 9 and events[2][3] == "Pos" and invalid == 0 and all(e[0] > T0 for e in events)
+    assert clock == T0 + timedelta(seconds=np.sqrt(3600 * 7200))
+    orphan = [ids["LABQ//1"], ids["RESULT//Neg"]]
+    assert vocabulary.decode(orphan, T0, np.zeros(2))[2] == 2
 
 
 # ---- temporal cutoffs (internal invariance: nothing after T reaches the prompt at T) ---------------------------------
-def test_prompt_uses_only_history_at_the_prediction_time(vocabulary):
-    late_race = _events([
+def test_prompt_uses_only_history_at_the_prediction_time():
+    frame = _events([
         (7, None, "GENDER//F"), (7, T0 - timedelta(days=365.25 * 40), "MEDS_BIRTH"),
         (7, _hours(0), "HOSPITAL_ADMISSION//EW EMER.//EMERGENCY ROOM"),
-        (7, _hours(1), "LAB//220179//mmHg", 120.0), (7, _hours(2), "LAB//220179//mmHg", 130.0),
-        (7, _hours(9), "LAB//220179//mmHg", 140.0),
+        *((7, _hours(h), "HR", 60.0 + h) for h in (1, 2, 9, 16, 23, 30)),
         (7, _hours(500), "HOSPITAL_ADMISSION//URGENT//TRANSFER FROM HOSPITAL", None, None, None, "WHITE"),
         (7, _hours(600), "MEDS_DEATH"),
     ])
-    keys = pl.DataFrame({"subject_id": [7, 7, 7], "prediction_time": [_hours(-5), _hours(1.5), _hours(2.5)]},
-                        schema={"subject_id": pl.Int64, "prediction_time": pl.Datetime("us")})
-    before, middle, after = (_tokens(vocabulary, s) for s in _sequences(vocabulary, late_race, keys)["tokens"])
-    # No event yet: the timeline starts at T (5 h short of 40 years).
-    assert before == ["[BOS]", "CODE//GENDER//F", "AGE//39y", "YEAR//2150-2154"]
-    # 1.5 h: the 1 h blood pressure (120, bin (110, 120]) is visible because its window's later value is not recorded.
-    assert middle[-3:] == ["TIME//1h-2h", "VITAL//SBP//5", "TIME//15m-1h"]
-    # 2.5 h: the 2 h value (130) supersedes it; race (recorded later), death, EOS and padding never appear.
-    assert after.count("VITAL//SBP//5") == 0 and after.count("VITAL//SBP//6") == 1
+    fitted = _Vocabulary.fit(frame.lazy(), CONFIG, _race(frame).lazy())
+    before, middle, after = (_tokens(fitted, s) for s in
+                             _sequences(fitted, frame, _keys(7, _hours(-5), _hours(1.5), _hours(2.5)))["tokens"])
+    assert before == ["[BOS]", "CODE//GENDER//F", "AGE//39y", "YEAR//2150-2154"]  # no event yet: timeline starts at T
+    assert middle[-3:-1] == ["CODE//HR", middle[-2]] and middle[-2].startswith("LABQ//")  # 1 h value visible
+    assert middle[-1] == "TIME//15m-1h"  # 30 minutes since it; the 2 h value is not yet recorded
+    assert after.count("CODE//HR") == 1 and after[after.index("CODE//HR") + 1] != middle[-2]  # 2 h replaced 1 h
     assert not any(t.startswith("RACE//") or t in ("CODE//MEDS_DEATH", "[EOS]") for t in before + middle + after)
-    training = _tokens(vocabulary, _sequences(vocabulary, late_race)["tokens"][0])
+    training = _tokens(fitted, _sequences(fitted, frame)["tokens"][0])
     assert "RACE//WHITE" in training and training[-1] == "[EOS]"
 
 
@@ -253,7 +201,7 @@ def test_prompts_are_invariant_to_rewritten_futures(tmp_path):
     perturbed = perturb_future(meds, index, tmp_path / "perturbed", splits=["held_out"], seed=3)
     algorithm = Curiosity(TEST_CONFIG)
     train = pl.scan_parquet(sorted((meds / "data" / "train").rglob("*.parquet")))
-    vocabulary = _Vocabulary.fit(train, TEST_CONFIG, category_predicates(MIMIC), algorithm._race(train))
+    vocabulary = _Vocabulary.fit(train, TEST_CONFIG, algorithm._race(train))
     keys = pl.read_parquet(index / "held_out.parquet").select("subject_id", "prediction_time")
 
     def prompts(directory):
@@ -277,12 +225,10 @@ def test_random_futures_never_change_random_prompts(vocabulary):
     for trial in range(25):
         cutoff = rng.choice(times) + timedelta(minutes=rng.choice([0, 1, 30, 300]))
         extra = [(1, cutoff + timedelta(microseconds=int(10 ** rng.uniform(0, 11))), *rng.choice(codes),
-                  rng.choice([None, "PO"]), rng.choice([None, "ASIAN"])) for _ in range(12)]
-        keys = pl.DataFrame({"subject_id": [1], "prediction_time": [cutoff]},
-                            schema={"subject_id": pl.Int64, "prediction_time": pl.Datetime("us")})
+                  rng.choice([None, "IV"]), rng.choice([None, "ASIAN"])) for _ in range(12)]
         history = base.filter(pl.col("time").is_null() | (pl.col("time") <= cutoff))
-        a = _sequences(vocabulary, pl.concat([base, _events(extra)]), keys)
-        b = _sequences(vocabulary, history, keys)
+        a = _sequences(vocabulary, pl.concat([base, _events(extra)]), _keys(1, cutoff))
+        b = _sequences(vocabulary, history, _keys(1, cutoff))
         assert a["tokens"].to_list() == b["tokens"].to_list(), f"trial {trial} at {cutoff}"
 
 
@@ -359,16 +305,19 @@ def test_aggregate_extends_equation_2_with_fallback():
     ]
 
 
-def test_tasks_needing_ungenerable_codes_are_rejected(vocabulary, tmp_path):
-    fitted = _Vocabulary.fit(_events([
-        (1, T0, "ICU_ADMISSION//MICU"), (1, T0 + timedelta(days=3), "ICU_DISCHARGE//MICU"), (2, T0, "MEDS_DEATH"),
-    ]).lazy(), CuriosityConfig(), category_predicates(MIMIC), None)
+
+
+def test_tasks_needing_ungenerable_codes_are_rejected(tmp_path):
+    icu = _events([(3, T0, "ICU_ADMISSION//MICU"), (3, T0 + timedelta(days=3), "ICU_DISCHARGE//MICU"),
+                   (4, T0, "MEDS_DEATH"), (5, T0, "ICU_CHART//220052//mmHg", 70.0)])
+    fitted = _Vocabulary.fit(icu.lazy(), CONFIG, None)
     _check_generable(TaskExtractorConfig.load(TASK_FILE, PREDICATES_FILE), fitted)
     task = tmp_path / "task.yaml"
-    task.write_text(TASK_FILE.read_text().replace('regex: "MEDS_DEATH.*"', 'regex: "^LAB//220045//"'))
+    task.write_text(TASK_FILE.read_text().replace('regex: "MEDS_DEATH.*"', 'regex: "^ICU_CHART//220052//"'))
+    _check_generable(TaskExtractorConfig.load(task, PREDICATES_FILE), fitted)  # any code of the training split
+    without = _Vocabulary.fit(icu.filter(pl.col("subject_id") != 5).lazy(), CONFIG, None)
     with pytest.raises(ValueError, match="cannot generate"):
-        _check_generable(TaskExtractorConfig.load(task, PREDICATES_FILE), vocabulary)
-
+        _check_generable(TaskExtractorConfig.load(task, PREDICATES_FILE), without)
 
 def test_trajectories_cover_every_key_after_its_prediction_time(signal_run):
     samples = pl.read_parquet(signal_run.artifacts["infer_trajectories"] / "samples.parquet")
@@ -381,6 +330,10 @@ def test_trajectories_cover_every_key_after_its_prediction_time(signal_run):
     horizon = samples.filter(pl.col("stop_reason") == "horizon")
     assert (horizon["end_time"] > horizon["prediction_time"] + timedelta(days=TEST_CONFIG.horizon_days)).all()
     assert set(samples["stop_reason"]) <= {"death", "end_of_record", "horizon", "token_budget"}
+    predictions = pl.read_parquet(signal_run.artifacts["predict_zero_shot_materialized"] / "predictions.parquet")
+    # meds-evaluation (MEDS-DEV) reads both the decision and the probability.
+    assert predictions["predicted_boolean_value"].equals(predictions["predicted_boolean_probability"] >= 0.5,
+                                                         check_names=False)
     training = json.loads((signal_run.artifacts["pretrain"] / "payload.json").read_text())["training"]
     assert training["extension"]["optimizer_steps"] == TEST_CONFIG.extension_steps
 
@@ -409,7 +362,9 @@ def test_saved_request_and_config_run_in_a_fresh_process(signal_run, tmp_path):
         (published / "request.json").read_text())["values"]["task"]
 
 
-# ---- size presets, race events, MIMIC-IV-MEDS code layouts ----------------------------------------------------------
+
+
+# ---- size presets --------------------------------------------------------------------------------------------------
 @pytest.mark.parametrize(("size", "shape"), [
     ("small", (6, 12, 768)), ("medium", (12, 12, 768)), ("large", (16, 32, 2048)), ("xlarge", (40, 40, 2560)),
 ])
@@ -433,41 +388,64 @@ def test_size_can_be_overridden_and_is_validated():
         CuriosityConfig(num_layers=0)
 
 
-def test_race_events_are_shown_only_once_recorded(vocabulary):
-    fitted = _Vocabulary.fit(_events([
-        (8, _hours(0), "HOSPITAL_ADMISSION//EW EMER.//EMERGENCY ROOM"), (8, _hours(0), "RACE//ASIAN"),
-        (9, None, "RACE//WHITE"), (9, _hours(0), "HOSPITAL_ADMISSION//EW EMER.//EMERGENCY ROOM"),
-    ]).lazy(), CONFIG, category_predicates(MIMIC), None)
-    frame = _events([
-        (8, _hours(0), "HOSPITAL_ADMISSION//EW EMER.//EMERGENCY ROOM"), (8, _hours(50), "RACE//ASIAN"),
-        (9, None, "RACE//WHITE"), (9, _hours(0), "HOSPITAL_ADMISSION//EW EMER.//EMERGENCY ROOM"),
-    ])
-    keys = pl.DataFrame({"subject_id": [8, 8, 9], "prediction_time": [_hours(1), _hours(60), _hours(1)]},
-                        schema={"subject_id": pl.Int64, "prediction_time": pl.Datetime("us")})
-    events, subjects = fitted.events(frame, None, CONFIG)
-    before, after, static = (_tokens(fitted, s) for s in fitted.sequences(events, subjects, keys)["tokens"])
-    assert "RACE//ASIAN" not in before and "RACE//ASIAN" in after and static[1] == "RACE//WHITE"
-    assert not any(t.startswith("CODE//RACE//") for t in before + after + static)  # header token, not an event
 
 
-@pytest.mark.parametrize("version", ["0.1.0", "0.4.0"])
-def test_mimic_category_file_matches_both_mimic_iv_meds_layouts(version):
-    codes = {
-        "0.1.0": {"diagnosis": "DIAGNOSIS//ICD//10//E1165", "vital_sbp_mmhg": "LAB//220179//mmHg",
-                  "vital_weight_kg": "LAB//226512//kg", "medication": "MEDICATION//START//Heparin",
-                  "lab": "LAB//RESULT//50912//mg/dL"},
-        "0.4.0": {"diagnosis": "DIAGNOSIS//ICD//10CM//E1165", "vital_sbp_mmhg": "ICU_CHART//220179//mmHg",
-                  "vital_weight_kg": "ICU_CHART//226512//kg", "medication": "MEDICATION//START//Heparin//63323026201",
-                  "lab": "LAB//SPECIMEN_COLLECTED//50912//STAT", "race": "RACE//WHITE",
-                  "procedure": "PROCEDURE//ICD//10PCS//0BH17EZ"},
-    }[version]
-    frame = _events([(1, T0, code) for code in codes.values()])
-    categorized = dict(_categorized_rows(frame))
-    assert categorized == {code: category for category, code in codes.items()}
-    assert "ICU_CHART//220045//bpm" not in dict(_categorized_rows(_events([(1, T0, "ICU_CHART//220045//bpm")])))
+# ---- hierarchy file ------------------------------------------------------------------------------------------------
+ICD_RULES = ({"regex": "^DIAGNOSIS//ICD//(9|10)(CM)?//", "separator": None, "widths": [3, 2, 2]},
+             {"regex": "^DIAGNOSIS//", "separator": "|", "widths": None})
 
 
-def _categorized_rows(frame):
-    from curiosity_meds._tokenizer import _categorized
+def test_split_code_after_the_matched_prefix():
+    from curiosity_meds._tokenizer import split_code
 
-    return _categorized(frame.lazy(), category_predicates(MIMIC)).select("code", "category").collect().rows()
+    assert split_code("DIAGNOSIS//ICD//10CM//E1165", ICD_RULES) == ("DIAGNOSIS//ICD//10CM//E11", ("65",), "")
+    assert split_code("DIAGNOSIS//ICD//9//25000", ICD_RULES) == ("DIAGNOSIS//ICD//9//250", ("00",), "")
+    assert split_code("DIAGNOSIS//ICD//10CM//S72001AXY", ICD_RULES) == (
+        "DIAGNOSIS//ICD//10CM//S72", ("00", "1A", "XY"), "")  # remainder beyond the widths: a last part
+    assert split_code("DIAGNOSIS//cardiovascular|shock|septic shock", ICD_RULES) == (
+        "DIAGNOSIS//cardiovascular", ("shock", "septic shock"), "|")
+    assert split_code("LAB//RESULT//50912//mg/dL", ICD_RULES) is None  # no rule: whole, units never split
+
+
+def test_hierarchy_files_are_validated(tmp_path):
+    from curiosity_meds._tokenizer import EXAMPLE_HIERARCHIES, load_hierarchy, split_code
+
+    shipped = load_hierarchy(EXAMPLE_HIERARCHIES / "MIMIC-IV.yaml")
+    for code in ("DIAGNOSIS//ICD//10CM//E1165", "DIAGNOSIS//ICD//10//E1165"):  # MIMIC-IV-MEDS 0.4.0 and 0.1.0
+        assert split_code(code, shipped)[1] == ("65",)
+    bad = tmp_path / "bad.yaml"
+    for text, match in [("hierarchy: []", "non-empty"), ("hierarchy: [{code: X, widths: [3]}]", "regex"),
+                        ("hierarchy: [{code: {regex: '^A'}}]", "exactly one"),
+                        ("hierarchy: [{code: {regex: '^A'}, widths: [0]}]", "positive")]:
+        bad.write_text(text)
+        with pytest.raises(ValueError, match=match):
+            load_hierarchy(bad)
+
+
+def test_hierarchy_tokens_share_ancestors_truncate_rare_parts_and_decode_exactly():
+    rows = [(40 + i, _hours(i), code) for i, code in enumerate(
+        ["DIAGNOSIS//ICD//10CM//E1165"] * 3 + ["DIAGNOSIS//ICD//10CM//E119"] * 3 + ["DIAGNOSIS//ICD//10CM//E1178"])]
+    frame = _events(rows)
+    rare = dataclasses.replace(CONFIG, min_code_count=2)
+    fitted = _Vocabulary.fit(frame.lazy(), rare, None, ICD_RULES)
+    assert {"CODE//DIAGNOSIS//ICD//10CM//E11", "SUB//1//65", "SUB//1//9"} <= set(fitted.tokens)
+    assert "SUB//1//78" not in fitted.tokens and "CODE//DIAGNOSIS//ICD//10CM//E1165" not in fitted.tokens
+    sequences = _sequences(fitted, frame, config=rare)["tokens"].to_list()
+    tokens = [_tokens(fitted, s) for s in sequences]
+    assert tokens[0][-2:] == ["CODE//DIAGNOSIS//ICD//10CM//E11", "SUB//1//65"]
+    assert tokens[-1][-1] == "CODE//DIAGNOSIS//ICD//10CM//E11"  # E1178: rare part, represented by its ancestor E11
+    ids = fitted.ids
+    events, _, invalid = fitted.decode([ids["CODE//DIAGNOSIS//ICD//10CM//E11"], ids["SUB//1//9"]], T0, np.zeros(2))
+    assert [e[1] for e in events] == ["DIAGNOSIS//ICD//10CM//E119"] and invalid == 0
+    assert fitted.decode([ids["SUB//1//9"]], T0, np.zeros(1))[2] == 1  # orphan part
+    assert {"DIAGNOSIS//ICD//10CM//E1165", "DIAGNOSIS//ICD//10CM//E119"} <= fitted.codes()
+    assert _Vocabulary.load(_saved(fitted)).joiners == fitted.joiners
+
+
+def _saved(vocabulary):
+    import tempfile
+    from pathlib import Path
+
+    path = Path(tempfile.mkdtemp()) / "vocabulary.json"
+    vocabulary.save(path)
+    return path

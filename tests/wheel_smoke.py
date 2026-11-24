@@ -22,18 +22,21 @@ def main():
     assert Curiosity.__module__.startswith("curiosity_meds.")
     assert CuriosityConfig.__module__.startswith("curiosity_meds.")
     repository = create_repository()
-    # Bundled defaults: paper-default config with the MIMIC-IV category mapping, its dependencies, and Qwen2.
+    # Bundled defaults: the default config, its dependencies, the tokenizer and Qwen2.
     from aces_relaxations import extract, normalize  # noqa: F401 - the task evaluation dependency must import
     from curiosity_meds._model import build_model
 
-    import yaml
-    from curiosity_meds._tokenizer import category_predicates
-    from curiosity_meds.config import CATEGORIES
-    from curiosity_meds.curiosity_meds import DATASETS_DIR
+    import polars as pl
+    from curiosity_meds._tokenizer import _Vocabulary
 
     config = CuriosityConfig()
-    mimic = yaml.safe_load((DATASETS_DIR / "MIMIC-IV.yaml").read_text())["predicates"]
-    assert [name for name, _ in category_predicates(mimic)] == [c for c in CATEGORIES if f"curiosity_{c}" in mimic]
+    events = pl.DataFrame({"subject_id": [1] * 12, "time": [f"2100-01-01 {h:02d}:00" for h in range(12)],
+                           "code": ["HR"] * 12, "numeric_value": [80.0 + h for h in range(12)]}).with_columns(
+                               pl.col("time").str.to_datetime())
+    assert "CODE//HR" in _Vocabulary.fit(events.lazy(), config, None).tokens
+    from curiosity_meds._tokenizer import EXAMPLE_HIERARCHIES, load_hierarchy
+
+    assert load_hierarchy(EXAMPLE_HIERARCHIES / "MIMIC-IV.yaml")  # the example hierarchy file ships in the wheel
     with tempfile.TemporaryDirectory() as directory:
         assert CuriosityConfig.load(config.save(Path(directory) / "config.json")) == config
     assert build_model(CuriosityConfig(capacity=1 / 12, num_layers=1), 32, 0).config.hidden_size == 64
