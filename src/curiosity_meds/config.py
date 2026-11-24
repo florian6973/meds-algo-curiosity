@@ -8,11 +8,12 @@ from meds_algorithm import NNConfig
 
 # The paper's event categories, in matching order. Which MEDS codes belong to each is dataset knowledge: the ACES
 # plain predicate ``curiosity_<category>`` in a dataset category file (``datasets/<dataset_name>.yaml`` or
-# ``additional_predicates_file``); ``null`` marks a category the dataset does not record. An event takes the first
+# ``additional_predicates_file``); a category the dataset does not record is omitted. An event takes the first
 # matching category. Vital categories carry their source unit; values are converted to the paper's units
 # (Table 2: mmHg, inches, pounds, kg/m2).
 CATEGORIES = (
     "sex",
+    "race",  # demographic header: the first race recorded by the cutoff (RACE//<value> codes)
     "birth",
     "gestational_age",  # numeric, completed weeks
     "birth_weight",  # numeric
@@ -37,14 +38,20 @@ CATEGORIES = (
 # total of Table 3, so that a dataset of any size keeps the same share of its events.
 _LABS_NUMERIC, _LABS_TEXT, _MEDICATIONS, _PROCEDURES = 31.5e9, 5.96e9, 9.43e9, 16.5e9
 
+# Model sizes: (layers, attention heads of 64 dimensions; MLP = 4 x width). small, medium and large are
+# Curiosity-0226 S/M/L (2508.12104v3 Table 3: 62M, 119M, 1B parameters at its 7,105-token vocabulary). xlarge is
+# Curiosity-0826-4B: 40 layers and ~4.3B parameters (2611.15710 Sec. 3.1); its width is not reported, and 2,560
+# (40 heads) is the width that gives ~4.2B parameters at 40 layers.
+SIZES = {"small": (6, 12), "medium": (12, 12), "large": (16, 32), "xlarge": (40, 40)}
+
 
 @dataclass(frozen=True, kw_only=True)
 class CuriosityConfig(NNConfig):
     """Curiosity settings.
 
-    Capacity mapping (reference = Curiosity-S of the 0226 paper, Table 3: 6 layers, width 768, 12 heads, MLP 3072;
-    the 0826 paper gives only 40 layers and ~4.3B parameters): ``heads = max(1, round(reference_heads * capacity))``,
-    ``hidden = heads * head_dim``, ``intermediate = mlp_ratio * hidden``; depth stays ``num_layers``.
+    ``size`` preselects the architecture (``SIZES``: small, medium, large, xlarge); ``num_layers`` and
+    ``reference_heads`` override its depth and heads. Then ``heads = max(1, round(reference_heads * capacity))``,
+    ``hidden = heads * head_dim``, ``intermediate = mlp_ratio * hidden``; depth is not scaled by ``capacity``.
     ``batch_size`` is sequences per device microbatch; ``sequences_per_step`` is reached by gradient accumulation.
     ``dropout`` is Qwen2's attention dropout (Qwen2 has no other dropout).
     """
@@ -68,8 +75,9 @@ class CuriosityConfig(NNConfig):
     follow_up_days: float = 365.0
 
     # Architecture (Qwen2, random initialization).
-    num_layers: int = 6
-    reference_heads: int = 12
+    size: str = "small"
+    num_layers: int | None = None  # None: the size's depth
+    reference_heads: int | None = None  # None: the size's heads
     head_dim: int = 64
     mlp_ratio: int = 4
     context_length: int = 8192  # stage 1 (paper Sec. 3)
@@ -99,8 +107,13 @@ class CuriosityConfig(NNConfig):
     fallback_probability: float = 0.5
 
     @property
+    def layers(self) -> int:
+        return self.num_layers if self.num_layers is not None else SIZES[self.size][0]
+
+    @property
     def num_heads(self) -> int:
-        return max(1, round(self.reference_heads * self.capacity))
+        heads = self.reference_heads if self.reference_heads is not None else SIZES[self.size][1]
+        return max(1, round(heads * self.capacity))
 
     @property
     def hidden_size(self) -> int:
@@ -113,8 +126,13 @@ class CuriosityConfig(NNConfig):
 
     def validate(self):
         super().validate()
+        if self.size not in SIZES:
+            raise ValueError(f"size must be one of {sorted(SIZES)}")
+        for name in ("num_layers", "reference_heads"):
+            if getattr(self, name) is not None and getattr(self, name) < 1:
+                raise ValueError(f"{name} must be positive")
         positive = (
-            "num_layers", "reference_heads", "head_dim", "mlp_ratio", "sequences_per_step", "max_epochs", "n_samples",
+            "head_dim", "mlp_ratio", "sequences_per_step", "max_epochs", "n_samples",
             "max_new_tokens", "max_attempts", "lab_min_bucket_observations",
         )
         for name in positive:

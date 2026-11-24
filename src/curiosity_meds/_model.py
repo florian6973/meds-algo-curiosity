@@ -38,7 +38,7 @@ def build_model(config: CuriosityConfig, vocab_size: int, pad_id: int):
             vocab_size=vocab_size,
             hidden_size=hidden,
             intermediate_size=config.mlp_ratio * hidden,
-            num_hidden_layers=config.num_layers,
+            num_hidden_layers=config.layers,
             num_attention_heads=config.num_heads,
             num_key_value_heads=config.num_heads,
             max_position_embeddings=config.generation_context,

@@ -67,7 +67,7 @@ Hydra multirun, multi-node training or checkpoint/resume.
 ## Publishing this algorithm
 
 Follow [the release guide](RELEASING.md) for package metadata, one-time PyPI Trusted Publisher setup,
-installed-wheel checks, and version-tag publication. All profiles ship in the `curiosity-meds`
+installed-wheel checks, and version-tag publication. All profiles ship in the `meds-algorithm-curiosity`
 distribution. Tests run in CI; publishing is an explicit workflow dispatch after implementation.
 
 ## Inputs and predicates

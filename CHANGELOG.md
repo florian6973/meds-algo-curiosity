@@ -9,4 +9,8 @@
   flag, and two-stage context extension to 16,384 tokens with unscaled RoPE.
 - Prompts are built from what is recorded at or before each prediction time; prompt-level temporal-invariance
   tests complement the shared future-blind conformance rerun.
-- `aces-relaxations` from PyPI (0.1.0); `meds-algorithm` pinned to the commit with temporal-leakage conformance.
+- Model size presets (`size`: small, medium, large, xlarge): Curiosity-0226 S/M/L and a 40-layer ~4.2B model for
+  Curiosity-0826-4B.
+- MIMIC-IV category file matches MIMIC-IV-MEDS 0.4.0 (MEDS-DEV's current build) and 0.1.0; race also comes from
+  `RACE//` events.
+- `aces-relaxations` from PyPI (0.1.0); `meds-algorithm` with the temporal-leakage conformance (0.4.0a6).

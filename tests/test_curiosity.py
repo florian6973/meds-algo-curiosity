@@ -407,3 +407,67 @@ def test_saved_request_and_config_run_in_a_fresh_process(signal_run, tmp_path):
     assert pl.read_parquet(output / "predictions.parquet").sort("subject_id").equals(original)
     assert json.loads((output / "request.json").read_text())["values"]["task"] == json.loads(
         (published / "request.json").read_text())["values"]["task"]
+
+
+# ---- size presets, race events, MIMIC-IV-MEDS code layouts ----------------------------------------------------------
+@pytest.mark.parametrize(("size", "shape"), [
+    ("small", (6, 12, 768)), ("medium", (12, 12, 768)), ("large", (16, 32, 2048)), ("xlarge", (40, 40, 2560)),
+])
+def test_size_presets_follow_the_papers(size, shape):
+    config = CuriosityConfig(size=size)
+    assert (config.layers, config.num_heads, config.hidden_size) == shape
+    with torch.device("meta"):
+        built = _model.build_model(config, 7105, 0)
+    parameters = sum(p.numel() for p in built.parameters())
+    # 0226 Table 3: S 62M, M 119M, L 1B; 0826: ~4.3B (width not reported).
+    expected = {"small": 62e6, "medium": 119e6, "large": 1.09e9, "xlarge": 4.2e9}[size]
+    assert parameters == pytest.approx(expected, rel=0.02)
+
+
+def test_size_can_be_overridden_and_is_validated():
+    assert CuriosityConfig(size="medium", num_layers=3).layers == 3
+    assert CuriosityConfig(size="large", capacity=0.5).num_heads == 16
+    with pytest.raises(ValueError, match="size"):
+        CuriosityConfig(size="huge")
+    with pytest.raises(ValueError, match="num_layers"):
+        CuriosityConfig(num_layers=0)
+
+
+def test_race_events_are_shown_only_once_recorded(vocabulary):
+    fitted = _Vocabulary.fit(_events([
+        (8, _hours(0), "HOSPITAL_ADMISSION//EW EMER.//EMERGENCY ROOM"), (8, _hours(0), "RACE//ASIAN"),
+        (9, None, "RACE//WHITE"), (9, _hours(0), "HOSPITAL_ADMISSION//EW EMER.//EMERGENCY ROOM"),
+    ]).lazy(), CONFIG, category_predicates(MIMIC), None)
+    frame = _events([
+        (8, _hours(0), "HOSPITAL_ADMISSION//EW EMER.//EMERGENCY ROOM"), (8, _hours(50), "RACE//ASIAN"),
+        (9, None, "RACE//WHITE"), (9, _hours(0), "HOSPITAL_ADMISSION//EW EMER.//EMERGENCY ROOM"),
+    ])
+    keys = pl.DataFrame({"subject_id": [8, 8, 9], "prediction_time": [_hours(1), _hours(60), _hours(1)]},
+                        schema={"subject_id": pl.Int64, "prediction_time": pl.Datetime("us")})
+    events, subjects = fitted.events(frame, None, CONFIG)
+    before, after, static = (_tokens(fitted, s) for s in fitted.sequences(events, subjects, keys)["tokens"])
+    assert "RACE//ASIAN" not in before and "RACE//ASIAN" in after and static[1] == "RACE//WHITE"
+    assert not any(t.startswith("CODE//RACE//") for t in before + after + static)  # header token, not an event
+
+
+@pytest.mark.parametrize("version", ["0.1.0", "0.4.0"])
+def test_mimic_category_file_matches_both_mimic_iv_meds_layouts(version):
+    codes = {
+        "0.1.0": {"diagnosis": "DIAGNOSIS//ICD//10//E1165", "vital_sbp_mmhg": "LAB//220179//mmHg",
+                  "vital_weight_kg": "LAB//226512//kg", "medication": "MEDICATION//START//Heparin",
+                  "lab": "LAB//RESULT//50912//mg/dL"},
+        "0.4.0": {"diagnosis": "DIAGNOSIS//ICD//10CM//E1165", "vital_sbp_mmhg": "ICU_CHART//220179//mmHg",
+                  "vital_weight_kg": "ICU_CHART//226512//kg", "medication": "MEDICATION//START//Heparin//63323026201",
+                  "lab": "LAB//SPECIMEN_COLLECTED//50912//STAT", "race": "RACE//WHITE",
+                  "procedure": "PROCEDURE//ICD//10PCS//0BH17EZ"},
+    }[version]
+    frame = _events([(1, T0, code) for code in codes.values()])
+    categorized = dict(_categorized_rows(frame))
+    assert categorized == {code: category for category, code in codes.items()}
+    assert "ICU_CHART//220045//bpm" not in dict(_categorized_rows(_events([(1, T0, "ICU_CHART//220045//bpm")])))
+
+
+def _categorized_rows(frame):
+    from curiosity_meds._tokenizer import _categorized
+
+    return _categorized(frame.lazy(), category_predicates(MIMIC)).select("code", "category").collect().rows()

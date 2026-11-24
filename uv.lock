@@ -176,40 +176,6 @@ nvtx = [
 ]
 
 [[package]]
-name = "curiosity-meds"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "aces-relaxations" },
-    { name = "meds-algorithm", extra = ["data"] },
-    { name = "numpy" },
-    { name = "pyyaml" },
-    { name = "torch" },
-    { name = "transformers" },
-]
-
-[package.optional-dependencies]
-orchestration = [
-    { name = "meds-algorithm", extra = ["orchestration"] },
-]
-test = [
-    { name = "meds-algorithm", extra = ["conformance"] },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "aces-relaxations", specifier = "==0.1.0" },
-    { name = "meds-algorithm", extras = ["conformance"], marker = "extra == 'test'", git = "https://github.com/McDermottHealthAI/meds-algorithm.git?rev=fa8cdfad1140aebf01bd0b544aee6ff580ec98d3" },
-    { name = "meds-algorithm", extras = ["data"], git = "https://github.com/McDermottHealthAI/meds-algorithm.git?rev=fa8cdfad1140aebf01bd0b544aee6ff580ec98d3" },
-    { name = "meds-algorithm", extras = ["orchestration"], marker = "extra == 'orchestration'", git = "https://github.com/McDermottHealthAI/meds-algorithm.git?rev=fa8cdfad1140aebf01bd0b544aee6ff580ec98d3" },
-    { name = "numpy", specifier = ">=1.26" },
-    { name = "pyyaml", specifier = ">=6" },
-    { name = "torch", specifier = ">=2.6" },
-    { name = "transformers", specifier = ">=4.51" },
-]
-provides-extras = ["orchestration", "test"]
-
-[[package]]
 name = "es-aces"
 version = "0.7.4"
 source = { registry = "https://pypi.org/simple" }
@@ -620,6 +586,40 @@ orchestration = [
     { name = "hydra-core" },
     { name = "submitit" },
 ]
+
+[[package]]
+name = "meds-algorithm-curiosity"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "aces-relaxations" },
+    { name = "meds-algorithm", extra = ["data"] },
+    { name = "numpy" },
+    { name = "pyyaml" },
+    { name = "torch" },
+    { name = "transformers" },
+]
+
+[package.optional-dependencies]
+orchestration = [
+    { name = "meds-algorithm", extra = ["orchestration"] },
+]
+test = [
+    { name = "meds-algorithm", extra = ["conformance"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aces-relaxations", specifier = "==0.1.0" },
+    { name = "meds-algorithm", extras = ["conformance"], marker = "extra == 'test'", git = "https://github.com/McDermottHealthAI/meds-algorithm.git?rev=fa8cdfad1140aebf01bd0b544aee6ff580ec98d3" },
+    { name = "meds-algorithm", extras = ["data"], git = "https://github.com/McDermottHealthAI/meds-algorithm.git?rev=fa8cdfad1140aebf01bd0b544aee6ff580ec98d3" },
+    { name = "meds-algorithm", extras = ["orchestration"], marker = "extra == 'orchestration'", git = "https://github.com/McDermottHealthAI/meds-algorithm.git?rev=fa8cdfad1140aebf01bd0b544aee6ff580ec98d3" },
+    { name = "numpy", specifier = ">=1.26" },
+    { name = "pyyaml", specifier = ">=6" },
+    { name = "torch", specifier = ">=2.6" },
+    { name = "transformers", specifier = ">=4.51" },
+]
+provides-extras = ["orchestration", "test"]
 
 [[package]]
 name = "meds-evaluation"

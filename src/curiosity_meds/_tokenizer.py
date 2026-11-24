@@ -210,6 +210,19 @@ def _vital_values(frame: pl.LazyFrame) -> pl.LazyFrame:
     )
 
 
+def _races(kept: pl.DataFrame, column: pl.DataFrame | None) -> pl.DataFrame:
+    """First recorded race per subject and its time (null for a static record): from ``race`` category events
+    (``RACE//<value>`` codes, MIMIC-IV-MEDS >= 0.2) and from a race column (MIMIC-IV-MEDS 0.1.0 admission rows)."""
+    schema = {"subject_id": pl.Int64, "race": pl.String, "time": pl.Datetime("us")}
+    rows = [kept.filter(pl.col("category") == "race").select(
+        "subject_id", pl.col("code").str.strip_prefix("RACE//").alias("race"), "time")]
+    if column is not None and column.height:
+        rows.append(column.select(pl.col("subject_id").cast(pl.Int64), pl.col("race").cast(pl.String),
+                                  pl.col("time").cast(pl.Datetime("us"))))
+    frame = pl.concat([r.cast(schema) for r in rows]).filter(pl.col("race").is_not_null())
+    return frame.sort("subject_id", "time", "race", nulls_last=False).group_by("subject_id", maintain_order=True).first()
+
+
 @dataclass(frozen=True)
 class _Vocabulary:
     """Fitted tokenizer state (training split only)."""
@@ -302,9 +315,7 @@ class _Vocabulary:
             head, *parts = _split(code, kind == "ATC")
             heads.add(head)
             subs.update(_sub_token(kind, position, part) for position, part in enumerate(parts, 1) if part)
-        races = []
-        if race is not None:
-            races = sorted(race.select(pl.col("race").drop_nulls().unique()).collect()["race"].to_list())
+        races = sorted(_races(kept, race.collect() if race is not None else None)["race"].unique().to_list())
         starts = timed.group_by("subject_id").agg(pl.col("time").min())["time"].dt.year()
         years = sorted({year_token(y) for y in range(int(starts.min()), int(starts.max()) + 1)}) if len(starts) else []
         tokens = (
@@ -492,7 +503,7 @@ class _Vocabulary:
 
         # Subjects: static tokens, race and its first recorded time, birth, right-censoring time.
         subjects = frame.select(pl.col("subject_id").cast(pl.Int64).unique().sort())
-        static = kept.filter(pl.col("time").is_null()).group_by("subject_id", maintain_order=True).agg(
+        static = kept.filter(pl.col("time").is_null() & (pl.col("category") != "race")).group_by("subject_id", maintain_order=True).agg(
             code.explode(keep_nulls=False, empty_as_null=False).alias("static"))
         births = frame.lazy().filter(pl.col("code") == "MEDS_BIRTH").group_by("subject_id").agg(
             pl.col("time").min().cast(pl.Datetime("us")).alias("birth")).with_columns(pl.col("subject_id").cast(pl.Int64)).collect()
@@ -510,15 +521,11 @@ class _Vocabulary:
             )
         )
         race_ids = {t[6:]: i for t, i in ids.items() if t.startswith("RACE//")}
-        if race is not None and race.height:
-            subjects = subjects.join(race.select(
-                pl.col("subject_id").cast(pl.Int64),
-                pl.col("race").replace_strict(race_ids, default=None, return_dtype=pl.Int32),
-                pl.col("time").cast(pl.Datetime("us")).alias("race_time"),
-            ), on="subject_id", how="left")
-        else:
-            subjects = subjects.with_columns(pl.lit(None, dtype=pl.Int32).alias("race"),
-                                             pl.lit(None, dtype=pl.Datetime("us")).alias("race_time"))
+        subjects = subjects.join(_races(kept, race).select(
+            "subject_id",
+            pl.col("race").replace_strict(race_ids, default=None, return_dtype=pl.Int32),
+            pl.col("time").alias("race_time"),
+        ), on="subject_id", how="left")
         return events, subjects.select("subject_id", "static", "race", "race_time", "birth", "censor")
 
     # ---- sequences -----------------------------------------------------------------------------------------------

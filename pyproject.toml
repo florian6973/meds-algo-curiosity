@@ -3,11 +3,13 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "curiosity-meds"
+name = "meds-algorithm-curiosity"
 version = "0.1.0"
 description = "Curiosity-0826 generative medical event model: Qwen2 decoder pretrained on tokenized MEDS timelines, zero-shot task prediction by Monte Carlo generation of future timelines."
 readme = "README.md"
 authors = [{name = "Florent Pollet", email = "flo1.raymond@gmail.com"}]
+license = "MIT"
+license-files = ["LICENSE*"]
 
 requires-python = ">=3.12"
 dependencies = [

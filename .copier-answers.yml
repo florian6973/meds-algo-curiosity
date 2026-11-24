@@ -10,8 +10,8 @@ algorithm_slug: curiosity_meds
 author_email: flo1.raymond@gmail.com
 author_name: Florent Pollet
 implementation_source: https://arxiv.org/abs/2611.15710v1, building on https://arxiv.org/abs/2508.12104v3 (papers only; no code released)
-license_expression: ''
-package_name: curiosity-meds
+license_expression: MIT
+package_name: meds-algorithm-curiosity
 profiles:
 - zero_shot_materialized
 repository_url: https://github.com/florian6973/meds-algo-curiosity

@@ -1,13 +1,17 @@
-# Curiosity-0826 event categories (arXiv 2611.15710 Sec. 2) for MIMIC-IV in MEDS, as written by MIMIC-IV-MEDS 0.1.0
-# (the ETL MEDS-DEV builds the MIMIC-IV demo and full data with). One ACES plain predicate per category, named
-# curiosity_<category>; an event belongs to the first category (in config.CATEGORIES order) it matches. A
-# category MIMIC-IV does not record is omitted (listed in comments).
+# Curiosity-0826 event categories (arXiv 2611.15710 Sec. 2) for MIMIC-IV in MEDS, as written by MIMIC-IV-MEDS 0.4.0
+# (the ETL MEDS-DEV builds the MIMIC-IV demo and full data with since 2026-11) and 0.1.0: where their codes differ,
+# a predicate matches both (0.4.0: ICU_CHART chart events, 9CM/10CM diagnosis editions, RACE//<race> events, NDC
+# in medication codes; 0.1.0: LAB//<itemid> chart events, 9/10 editions, a race column). One ACES plain predicate
+# per category, named curiosity_<category>; an event belongs to the first category (in config.CATEGORIES order) it
+# matches. A category MIMIC-IV does not record is omitted (listed in comments).
 #
 # Not represented: notes and free text; eMAR administrations (the paper does not represent administrations, Sec. 2.6);
 # infusions, outputs, DRG, medication stops; other chartevents than the vitals below; hosp/omr (see vitals).
 predicates:
   curiosity_sex:
     code: { regex: "^GENDER//" }
+  curiosity_race:  # 0.4.0: one event per admission; 0.1.0 has a race column instead (CuriosityConfig.race_column)
+    code: { regex: "^RACE//" }
   # MEDS_BIRTH is computed from anchor_age (January 1 of the birth year), not a documented birth: it only dates the
   # age token. MIMIC-IV records no gestational age, birth weight or cause of death.
   # curiosity_birth: not recorded
@@ -18,28 +22,28 @@ predicates:
   # curiosity_cause_of_death: not recorded
   curiosity_encounter:  # hospital/ICU/ED start and end, transfers (type and care unit are part of the code)
     code: { regex: "^(HOSPITAL_ADMISSION//|HOSPITAL_DISCHARGE//|ICU_ADMISSION//|ICU_DISCHARGE//|TRANSFER_TO//|ED_REGISTRATION$|ED_OUT$)" }
-  curiosity_diagnosis:  # DIAGNOSIS//ICD//<9|10>//<code without dots>, split 3/2/2
-    code: { regex: "^DIAGNOSIS//ICD//(9|10)//" }
+  curiosity_diagnosis:  # DIAGNOSIS//ICD//<9CM|10CM> (0.4.0) or <9|10> (0.1.0)//<code without dots>, split 3/2/2
+    code: { regex: "^DIAGNOSIS//ICD//(9|10)(CM)?//" }
   # hosp/labevents: MIMIC-IV-MEDS >= 0.1.0 already writes the paper's lab collection marker
   # (LAB//SPECIMEN_COLLECTED//<itemid>//<priority> at charttime, no value) and the result
   # (LAB//RESULT//<itemid>//<unit> at storetime, numeric_value and text_value). Neither is synthesized here.
   curiosity_lab:
     code: { regex: "^LAB//(RESULT|SPECIMEN_COLLECTED)//" }
-  # Vitals from icu/chartevents (LAB//<itemid>//<unit>): non-invasive and arterial blood pressure, admission/daily
-  # weight, height. hosp/omr (outpatient BP, weight, height, BMI) is excluded: MIMIC-IV-MEDS times it at 00:00 of
-  # chartdate, so a value would be visible before it was measured that day.
+  # Vitals from icu/chartevents (ICU_CHART//<itemid>//<unit>; LAB// before 0.4.0): non-invasive and arterial blood
+  # pressure, admission/daily weight, height. hosp/omr (outpatient BP, weight, height, BMI) is excluded: MIMIC-IV-MEDS
+  # times it at 00:00 of chartdate, so a value would be visible before it was measured that day.
   curiosity_vital_sbp_mmhg:
-    code: { regex: "^LAB//(220179|220050)//mmHg$" }
+    code: { regex: "^(ICU_CHART|LAB)//(220179|220050)//mmHg$" }
   curiosity_vital_dbp_mmhg:
-    code: { regex: "^LAB//(220180|220051)//mmHg$" }
+    code: { regex: "^(ICU_CHART|LAB)//(220180|220051)//mmHg$" }
   curiosity_vital_height_in:
-    code: { regex: "^LAB//226707//" }
+    code: { regex: "^(ICU_CHART|LAB)//226707//" }
   curiosity_vital_height_cm:
-    code: { regex: "^LAB//226730//" }
+    code: { regex: "^(ICU_CHART|LAB)//226730//" }
   curiosity_vital_weight_lb:
-    code: { regex: "^LAB//226531//" }
+    code: { regex: "^(ICU_CHART|LAB)//226531//" }
   curiosity_vital_weight_kg:
-    code: { regex: "^LAB//(226512|224639)//kg$" }
+    code: { regex: "^(ICU_CHART|LAB)//(226512|224639)//kg$" }
   # curiosity_vital_bmi: not recorded
   # hosp/pharmacy orders (the paper tokenizes order instants). Codes are drug names (no ATC in MIMIC-IV), so they stay
   # whole; route and frequency come from the ETL's extra columns. MIMIC-IV-ED medrecon is not in MIMIC-IV-MEDS.
