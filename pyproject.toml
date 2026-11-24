@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "meds-algorithm-curiosity"
-version = "0.1.1"
+version = "0.1.2"
 description = "Curiosity-0826 generative medical event model: Qwen2 decoder pretrained on tokenized MEDS timelines, zero-shot task prediction by Monte Carlo generation of future timelines."
 readme = "README.md"
 authors = [{name = "Florent Pollet", email = "flo1.raymond@gmail.com"}]

@@ -35,7 +35,7 @@
 | Downsampling window | 0826 Sec. 2.4 ("latest value in each rolling 6-hour window", for vitals) | Windows anchored on data / on the clock | Clock-aligned 6-hour windows per numeric code; a value is hidden only once the later value of its window is visible, so prompts never depend on the future | Routine (`downsample_hours`) | `_supersede`, `sequences` |
 | Stage 2 learning rate | 0826 Sec. 3.2 (steps and epochs given, schedule not) | — | Constant at the final stage-1 rate (`learning_rate × final_lr_ratio`) | Routine | `_model._extend` |
 | Model size | 0226 Table 3 (S 6×768, M 12×768, L 16×2048; 12/12/32 heads; MLP 4×); 0826 Sec. 3.1 (40 layers, ~4.3B, width not reported) | — | `size` presets: small/medium/large = 0226 S/M/L (62M, 119M, 1.09B measured at the 7,105-token vocabulary); xlarge = 40 layers × 2,560 (40 heads), the width that gives ~4.2B at 40 layers; default `small` (MIMIC-IV is orders of magnitude below the papers' budgets). `num_layers`/`reference_heads`/`capacity` override a preset | Resolved from source (S/M/L); xlarge width routine | `config.SIZES`, `test_size_presets_follow_the_papers` |
-| Generation budget | 0826 Sec. 4.1 (60 simulations, 3,000-4,000 tokens, 2-4 retries per task) | — | n = 60, 4,000 tokens, 5 attempts (four retries, the 365-day mortality setting) for a task-independent `infer_trajectories` | Routine (configurable) | `config.py` |
+| Generation budget | 0826 Sec. 4.1 (20-80 simulations per task, 60 for 365-day mortality; 1,500-4,000 tokens; 2-4 retries) | n = 60 (the 365-day mortality setting) / 100 (Monte Carlo error ±0.05 instead of ±0.065 at p = 0.5, 1.7× the inference cost) | n = 100, 4,000 tokens, 5 attempts (four retries, the 365-day mortality setting) for a task-independent `infer_trajectories` | n = 100 **confirmed** by Florent (2026-11-24): "we would like to use 100", "please change the package itself"; token budget and retries routine (configurable) | `config.py` |
 | Key with no resolved future | Contract §5 (finite probabilities) | — | Fallback 0.5, keys in `unresolved_keys.arrow` | **Confirmed** 2026-11-09: "Finite fallback + flag file" | `predict_zero_shot_materialized` |
 | Futures that cannot answer the task | 0226 Eq. 2; 0826 Sec. 4.1 (incomplete simulations discarded) | — | Probability = positives / resolved futures | **Confirmed** 2026-11-09 | `_aggregate` |
 | Time-token edges, embedding tying, KV heads, optimizer defaults | as recorded for 0226 | — | Unchanged (0826: unchanged representations) | Resolved from source / routine | `_tokenizer.py`, `_model.py` |
@@ -88,7 +88,7 @@
   `(subject_id, prediction_time)`, `_Vocabulary.sequences` builds the prompt from the prepared events recorded at or
   before the prediction time: BOS, static codes, race once recorded, age and year at the start of the visible
   timeline, the visible events (numeric values not yet superseded by then) with time tokens, then the elapsed-gap time tokens. It samples
-  `n_samples` = 60 futures at temperature 1, no top-k/top-p, with a per-key RNG seeded from
+  `n_samples` = 100 futures at temperature 1, no top-k/top-p, with a per-key RNG seeded from
   `(seed, subject_id, prediction_time)`. Each future runs up to 5 attempts × 4,000 tokens and stops at EOS
   (`death`; EOS follows only a death), BOS (`end_of_record`), generated time beyond prediction_time + 365 d
   (`horizon`), or the token budget (`token_budget`).

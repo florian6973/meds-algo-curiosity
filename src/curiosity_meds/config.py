@@ -72,8 +72,9 @@ class CuriosityConfig(NNConfig):
     gradient_clip: float = 1.0
     device: str = "auto"
 
-    # Generation (paper Sec. 4.1: 60 simulations, up to 4,000 tokens, four retries for 365-day mortality).
-    n_samples: int = 60
+    # Generation: 100 futures (chosen by Florent; the paper uses 20-80 per task, 60 for 365-day mortality, Sec. 4.1),
+    # up to 4,000 tokens and four retries (the paper's 365-day mortality setting).
+    n_samples: int = 100
     temperature: float = 1.0
     max_new_tokens: int = 4000
     max_attempts: int = 5
