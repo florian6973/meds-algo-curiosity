@@ -8,6 +8,8 @@
   `route`, `dose`, `frequency` columns give attribute tokens on any row. One frequency threshold
   (`min_code_count`, `min_code_share`) for every code: rarer codes become `[UNK]`. The latest value of each numeric
   code in each 6-hour window is kept (`downsample_hours`). `MEDS_BIRTH` and `MEDS_DEATH` remain special.
+- Predictions include `predicted_boolean_value` (probability ≥ 0.5) next to the probability: MEDS-DEV's evaluation
+  (meds-evaluation) requires it, so 0.1.0 predictions could not be evaluated there.
 - Any MEDS dataset runs without per-dataset configuration, and any task whose codes occur in training can be
   answered (e.g. MEDS-DEV's hypotension task on mean arterial pressure).
 

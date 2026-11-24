@@ -120,7 +120,7 @@
 | `preprocess_data` | `curiosity-events/v2`: `vocabulary.json`, `events/<split>/<shard>.parquet` (`subject_id, time, order, tokens, superseded`), `subjects/<split>/<shard>.parquet` (`static, race, race_time, birth, censor`), `payload.json` | — | vocabulary digest, fitted split, SHA-256 of every MEDS shard, per-split subject/event counts |
 | `pretrain` | `curiosity-qwen2/v2`: `model/`, `payload.json` | data payload format | vocabulary digest; per-epoch losses, optimizer steps, stage-2 summary, parameters, device |
 | `infer_trajectories` | `curiosity-trajectories/v2`: `events.parquet` (with `text_value`), `samples.parquet`, `payload.json` | data and model formats; equal vocabulary digests | n, sampling policy, horizon, budget, prompt rule, stop reasons |
-| `predict_zero_shot_materialized` | `curiosity-predictions/v2`: `predictions.parquet`, `unresolved_keys.arrow`, `relaxations.yaml` | trajectories format and vocabulary; every key has `n_samples` samples; task generability | core records task provenance |
+| `predict_zero_shot_materialized` | `curiosity-predictions/v2`: `predictions.parquet` (keys, `predicted_boolean_value` = probability ≥ 0.5, `predicted_boolean_probability`), `unresolved_keys.arrow`, `relaxations.yaml` | trajectories format and vocabulary; every key has `n_samples` samples; task generability | core records task provenance |
 
 ## Scientific deviations
 
@@ -184,6 +184,7 @@
 | Local (WSL Ubuntu, CPU, 2026-11-24, core 0.4.0a6, dataset-agnostic tokenizer) | `uv run pytest -rs` | 47 passed, 3 skipped (null world: zero-shot; opt-in `meds_dev` and `real_data`) | Conformance (lifecycle, label-blind rerun, future-blind rerun with probabilities identical up to rounding, split canaries, task binding, ledger), primary behavior, algorithm-specific tests incl. whole-code tokens with value/result/attribute tokens, `[UNK]` threshold, causal downsampling, prompt-level temporal invariance and size presets |
 | Release | `python scripts/check_release.py`; `bash scripts/check_distribution.sh` | both pass | metadata, license, no direct-URL dependencies, installed wheel (plain and orchestration) |
 | MEDS-DEV | `uv run pytest -m meds_dev -rs` | not rerun for 0826 | 0226 gate passed on 2026-11-09 |
+| MEDS-DEV integration (draft `curiosity/small`, MIMIC-IV demo, hypotension task; 0.1.1 wheel with the earlier `other` category) | MEDS-DEV `pytest -m integration --test_model=curiosity/small` | 7 passed, 1 error | Dataset build, task, preprocessing, pretraining, trajectories and predictions ran; evaluation failed because predictions lacked `predicted_boolean_value` (also true of 0.1.0): fixed, written as probability ≥ 0.5 |
 | MIMIC-IV demo | `uv run pytest -m real_data -rs` | not run: awaiting human approval | — |
 | Full target dataset | not run | — | Blocked: no evaluation task bundle supplied |
 

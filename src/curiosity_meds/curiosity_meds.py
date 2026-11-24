@@ -305,7 +305,12 @@ class Curiosity(ZeroShotMaterializedAlgorithm):
             )
         per_key = _aggregate(pl.concat(outcomes), config.fallback_probability)
         output = request.output.directory
-        per_key.select(*PREDICTION_KEYS, "predicted_boolean_probability").write_parquet(output / "predictions.parquet")
+        # meds-evaluation (MEDS-DEV) needs a decision as well as the probability: positive at 0.5 or more.
+        per_key.select(
+            *PREDICTION_KEYS,
+            (pl.col("predicted_boolean_probability") >= 0.5).alias("predicted_boolean_value"),
+            "predicted_boolean_probability",
+        ).write_parquet(output / "predictions.parquet")
         unresolved = per_key.filter(pl.col("resolved") == 0).select(*PREDICTION_KEYS, "samples", "resolved")
         unresolved.write_ipc(output / "unresolved_keys.arrow")
         resolved_fraction = float(per_key["resolved"].sum() / max(int(per_key["samples"].sum()), 1))

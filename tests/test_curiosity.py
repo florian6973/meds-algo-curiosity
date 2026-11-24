@@ -330,6 +330,10 @@ def test_trajectories_cover_every_key_after_its_prediction_time(signal_run):
     horizon = samples.filter(pl.col("stop_reason") == "horizon")
     assert (horizon["end_time"] > horizon["prediction_time"] + timedelta(days=TEST_CONFIG.horizon_days)).all()
     assert set(samples["stop_reason"]) <= {"death", "end_of_record", "horizon", "token_budget"}
+    predictions = pl.read_parquet(signal_run.artifacts["predict_zero_shot_materialized"] / "predictions.parquet")
+    # meds-evaluation (MEDS-DEV) reads both the decision and the probability.
+    assert predictions["predicted_boolean_value"].equals(predictions["predicted_boolean_probability"] >= 0.5,
+                                                         check_names=False)
     training = json.loads((signal_run.artifacts["pretrain"] / "payload.json").read_text())["training"]
     assert training["extension"]["optimizer_steps"] == TEST_CONFIG.extension_steps
 
