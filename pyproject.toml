@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "meds-algorithm-curiosity"
-version = "0.1.2"
+version = "0.1.3"
 description = "Curiosity-0826 generative medical event model: Qwen2 decoder pretrained on tokenized MEDS timelines, zero-shot task prediction by Monte Carlo generation of future timelines."
 readme = "README.md"
 authors = [{name = "Florent Pollet", email = "flo1.raymond@gmail.com"}]
@@ -14,8 +14,8 @@ license-files = ["LICENSE*"]
 requires-python = ">=3.12"
 dependencies = [
   "pyyaml>=6",
-  # 0.4.0a6 is the first release with the temporal-leakage conformance (conformance/temporal.py).
-  "meds-algorithm[data]==0.4.0a6",
+  # 0.4.0a7: temporal-leakage conformance (0.4.0a6) and SLURM runs from an installed release.
+  "meds-algorithm[data]==0.4.0a7",
   # ACES evaluation of the task on real history + futures.
   "aces-relaxations==0.1.0",
   "numpy>=1.26",
@@ -25,9 +25,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-orchestration = ["meds-algorithm[orchestration]==0.4.0a6"]
+orchestration = ["meds-algorithm[orchestration]==0.4.0a7"]
 # meds-evaluation is pinned to the version MEDS-DEV evaluates predictions with.
-test = ["meds-algorithm[conformance]==0.4.0a6"]
+test = ["meds-algorithm[conformance]==0.4.0a7"]
 
 [project.urls]
 Repository = "https://github.com/florian6973/meds-algo-curiosity"

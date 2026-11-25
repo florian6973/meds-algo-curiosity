@@ -1,5 +1,10 @@
 # Changes
 
+## 0.1.3 (2026-11-24)
+
+- Requires `meds-algorithm==0.4.0a7`: `curiosity-meds run execution=slurm …` now works from a PyPI install (the runner
+  records the installed version and every SLURM job checks it), not only from a Git checkout.
+
 ## 0.1.2 (2026-11-24)
 
 - 100 sampled futures per prediction time by default (`n_samples`; was 60, the paper's 365-day mortality setting).
