@@ -14,7 +14,7 @@
   `ethos/tokenize/special_tokens.py`, commit a1f03ec), which the 0226 paper says it adapted.
 - Reused packages: `aces-relaxations==0.1.0` (PyPI; ACES extraction of the task on history + futures), `es-aces`
   0.7.4, HF `transformers` (`Qwen2ForCausalLM`, the 0226 architecture), `torch`.
-- Template: MEDS_algorithm_template @ `731e759` (temporal-leakage conformance, #52); core `meds-algorithm==0.4.0a6` (the first release with `conformance/temporal.py`),
+- Template: MEDS_algorithm_template @ `731e759` (temporal-leakage conformance, #52); core `meds-algorithm==0.4.0a7` (temporal-leakage conformance; SLURM runs from an installed release),
   contract v4.
 
 ## Scientific assumptions and decisions
